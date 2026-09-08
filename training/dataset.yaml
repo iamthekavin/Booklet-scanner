@@ -1,0 +1,15 @@
+# VEE Scanner - Booklet Detection Dataset
+# For use with Ultralytics YOLO11 training
+
+path: D:/VEE_SCAN/training/dataset  # absolute path to dataset directory
+train: train/images
+val: valid/images
+test: test/images  # optional
+
+# Class definitions
+names:
+  0: booklet
+  1: hand
+
+# Number of classes
+nc: 2

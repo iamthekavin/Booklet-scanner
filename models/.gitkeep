@@ -1,0 +1,3 @@
+# VEE Scanner model weights directory
+# Trained models (.pt, .onnx, .engine) go here.
+# This directory is git-ignored.
