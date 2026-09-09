@@ -114,9 +114,90 @@ class PerspectiveWarper:
 
     def enhance_scan(self, page_image: np.ndarray) -> np.ndarray:
         """
-        Enhancement and deskew (Part 3) removed per user request.
+        FR-2.5: Light Text Enhancement with Original Ink Preservation (Adobe Scan style).
+        
+        1. Estimates smooth 2D background illumination surface per channel 
+           via downsampled upper-percentile block grid + Gaussian smoothing.
+        2. Divides each channel by background to remove shadows, lighting gradients, 
+           and yellowed/gray paper background.
+        3. Applies a soft threshold and sub-linear boost (Light Text curve) to lift 
+           faint pencil, light ballpoint, and faded strokes into dark, legible text.
+        4. Fades saturation to 0 on pure paper (pure white #FFFFFF), while boosting
+           saturation on ink strokes (blue pen stays rich blue, red stays red).
+        5. Applies mild unsharp mask for crisp stroke edges.
         """
-        return page_image
+        if page_image is None or page_image.size == 0:
+            return page_image
+
+        try:
+            # Ensure 3-channel BGR
+            if len(page_image.shape) == 2:
+                page_image = cv2.cvtColor(page_image, cv2.COLOR_GRAY2BGR)
+
+            h, w = page_image.shape[:2]
+
+            # 1. Background illumination estimation
+            target_w = 600
+            scale = target_w / float(w)
+            target_h = max(1, int(h * scale))
+            small = cv2.resize(page_image, (target_w, target_h), interpolation=cv2.INTER_AREA)
+
+            block_size = 24
+            grid_h = int(np.ceil(target_h / block_size))
+            grid_w = int(np.ceil(target_w / block_size))
+            bg_grid = np.zeros((grid_h, grid_w, 3), dtype=np.float32)
+
+            for ch in range(3):
+                channel = small[:, :, ch].astype(np.float32)
+                for r in range(grid_h):
+                    r_start = r * block_size
+                    r_end = min((r + 1) * block_size, target_h)
+                    for c in range(grid_w):
+                        c_start = c * block_size
+                        c_end = min((c + 1) * block_size, target_w)
+                        block = channel[r_start:r_end, c_start:c_end]
+                        if block.size > 0:
+                            bg_grid[r, c, ch] = np.percentile(block, 92)
+
+            for ch in range(3):
+                bg_grid[:, :, ch] = cv2.GaussianBlur(bg_grid[:, :, ch], (3, 3), 0)
+
+            bg_full = cv2.resize(bg_grid, (w, h), interpolation=cv2.INTER_CUBIC)
+            bg_full = np.maximum(bg_full, 1.0)
+
+            # 2. Divide each channel by its background illumination (paper -> ~255)
+            norm = np.clip((page_image.astype(np.float32) / bg_full) * 255.0, 0.0, 255.0)
+
+            # 3. Light Text contrast boost in HSV color space
+            norm_uint8 = norm.astype(np.uint8)
+            hsv = cv2.cvtColor(norm_uint8, cv2.COLOR_BGR2HSV).astype(np.float32)
+
+            H = hsv[:, :, 0]
+            S = hsv[:, :, 1]
+            V = hsv[:, :, 2]
+
+            # Suppress back-of-page bleed-through (diff < 10), boost light ink/pencil
+            diff = np.maximum(0.0, 246.0 - V)
+            ink_score = np.clip((diff - 10.0) / (246.0 - 10.0 - 30.0), 0.0, 1.0)
+            ink_boosted = np.power(ink_score, 0.70)
+
+            V_new = np.clip((1.0 - ink_boosted * 0.90) * 255.0, 0.0, 255.0)
+
+            # Pure white paper (sat=0) + rich vibrant ink color
+            sat_mask = np.clip(ink_score * 4.0, 0.0, 1.0)
+            S_new = np.clip(S * 1.4 * sat_mask, 0.0, 255.0)
+
+            out_hsv = cv2.merge([H, S_new, V_new]).astype(np.uint8)
+            out_bgr = cv2.cvtColor(out_hsv, cv2.COLOR_HSV2BGR)
+
+            # 4. Subtle unsharp mask for crisp stroke edges
+            blur = cv2.GaussianBlur(out_bgr, (0, 0), 1.0)
+            crisp = cv2.addWeighted(out_bgr, 1.25, blur, -0.25, 0)
+
+            return crisp
+        except Exception as e:
+            logger.error(f"Failed to enhance scan with Light Text filter: {e}")
+            return page_image
 
 def four_point_transform(image: np.ndarray, pts: np.ndarray) -> np.ndarray:
     """
