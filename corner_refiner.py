@@ -12,8 +12,8 @@ MIN_AREA_RATIO = 0.05
 MAX_AREA_RATIO = 0.95
 MIN_ANGLE_DEG = 30.0
 MAX_ASPECT_RATIO = 3.0
-MIN_ROI_COVERAGE = 0.55  # candidate quad must cover >=55% of the cropped ROI
-MIN_ROI_SPAN = 0.70      # candidate quad must span >=70% of ROI width and height
+MIN_ROI_COVERAGE = 0.40  # candidate quad must cover >=40% of the cropped ROI
+MIN_ROI_SPAN = 0.55      # candidate quad must span >=55% of ROI width and height
 
 HOUGH_CONFIDENCE = 1.0
 CONTOUR_CONFIDENCE = 0.8
@@ -65,7 +65,7 @@ class CornerRefiner:
             roi_gray = self._preprocess_roi(roi)
 
             # Strategy A: Contour method (Otsu paper segmentation preferred)
-            corners = self._contour_method(roi_gray)
+            corners = self._contour_method(roi_gray, roi_bgr=roi)
             confidence = CONTOUR_CONFIDENCE
 
             # Strategy B: Hough line intersection
@@ -260,26 +260,48 @@ class CornerRefiner:
 
         return intersections
 
-    def _contour_method(self, roi_gray: np.ndarray) -> Optional[np.ndarray]:
-        """Find corners using largest contour (Otsu paper segmentation first, adaptive as fallback)."""
+    def _contour_method(
+        self, roi_gray: np.ndarray, roi_bgr: Optional[np.ndarray] = None
+    ) -> Optional[np.ndarray]:
+        """Find corners using largest contour (paper color segmentation + Otsu, adaptive as fallback)."""
         try:
             blurred = cv2.GaussianBlur(roi_gray, (5, 5), 0)
 
-            # Strategy 1: Otsu binarization + morphological close to isolate the white paper sheet
+            # Strategy 1: Paper color segmentation + Otsu binarization + morphological close
             _, thresh_otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
-            closed = cv2.morphologyEx(thresh_otsu, cv2.MORPH_CLOSE, kernel)
+
+            if roi_bgr is not None and len(roi_bgr.shape) == 3 and roi_bgr.shape[2] == 3:
+                hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+                s = hsv[:, :, 1]
+                v = hsv[:, :, 2]
+                # White/off-white paper: low saturation (S < 85), moderate-to-high brightness (V > 70)
+                paper_mask = ((s < 85) & (v > 70)).astype(np.uint8) * 255
+                seg_mask = thresh_otsu & paper_mask
+            else:
+                seg_mask = thresh_otsu
+
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+            closed = cv2.morphologyEx(seg_mask, cv2.MORPH_CLOSE, kernel)
 
             contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             if contours:
                 c = max(contours, key=cv2.contourArea)
                 hull = cv2.convexHull(c)
-                epsilon = 0.02 * cv2.arcLength(hull, True)
-                approx = cv2.approxPolyDP(hull, epsilon, True)
-                if len(approx) == 4:
-                    pts = approx.reshape(4, 2).astype(np.float32)
-                    if self.validate_roi_quad(pts, roi_gray.shape):
-                        return pts
+                peri = cv2.arcLength(hull, True)
+                # Multi-epsilon search: textured/patterned backgrounds or paper wrinkles
+                # may produce extra vertices at a single fixed epsilon
+                for eps in (0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.045, 0.05):
+                    approx = cv2.approxPolyDP(hull, eps * peri, True)
+                    if len(approx) == 4:
+                        pts = approx.reshape(4, 2).astype(np.float32)
+                        if self.validate_roi_quad(pts, roi_gray.shape):
+                            return pts
+
+                # Fallback: minAreaRect fits the minimum enclosing oriented rectangle to the paper contour
+                rect = cv2.minAreaRect(hull)
+                box = cv2.boxPoints(rect).astype(np.float32)
+                if self.validate_roi_quad(box, roi_gray.shape):
+                    return box
 
             # Strategy 2: Adaptive thresholding (for low-contrast or textured backgrounds)
             thresh = cv2.adaptiveThreshold(
@@ -287,27 +309,16 @@ class CornerRefiner:
             )
 
             contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if not contours:
-                return None
-
-            largest_contour = max(contours, key=cv2.contourArea)
-            epsilon = 0.02 * cv2.arcLength(largest_contour, True)
-            approx = cv2.approxPolyDP(largest_contour, epsilon, True)
-
-            if len(approx) == 4:
-                pts = approx.reshape(4, 2).astype(np.float32)
-                if self.validate_roi_quad(pts, roi_gray.shape):
-                    return pts
-
-            # Try convex hull + approxPolyDP
-            hull = cv2.convexHull(largest_contour)
-            epsilon = 0.02 * cv2.arcLength(hull, True)
-            approx = cv2.approxPolyDP(hull, epsilon, True)
-
-            if len(approx) == 4:
-                pts = approx.reshape(4, 2).astype(np.float32)
-                if self.validate_roi_quad(pts, roi_gray.shape):
-                    return pts
+            if contours:
+                largest_contour = max(contours, key=cv2.contourArea)
+                hull = cv2.convexHull(largest_contour)
+                peri = cv2.arcLength(hull, True)
+                for eps in (0.015, 0.02, 0.025, 0.03, 0.035, 0.04):
+                    approx = cv2.approxPolyDP(hull, eps * peri, True)
+                    if len(approx) == 4:
+                        pts = approx.reshape(4, 2).astype(np.float32)
+                        if self.validate_roi_quad(pts, roi_gray.shape):
+                            return pts
 
         except Exception as e:
             logger.debug(f"Contour method failed: {e}")

@@ -48,7 +48,7 @@ FONT_SMALL  = cv2.FONT_HERSHEY_PLAIN
 # ═══════════════════════════════════════════════════════════════════════
 # Quality Gate Constants
 # ═══════════════════════════════════════════════════════════════════════
-SHARPNESS_MIN = 150.0
+SHARPNESS_MIN = 45.0
 GLARE_FRAC_MAX = 0.02
 
 def check_image_quality(frame: np.ndarray) -> tuple[bool, float, float, str]:

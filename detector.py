@@ -154,15 +154,15 @@ class BookletDetector:
             if bbox_area <= 0:
                 return False
             area_ratio = quad_area / bbox_area
-            # Quad area must be within 65% to 135% of the YOLO bbox area
-            if area_ratio < 0.65 or area_ratio > 1.35:
+            # Quad area must be within 40% to 135% of the YOLO bbox area
+            if area_ratio < 0.40 or area_ratio > 1.35:
                 return False
-            # Quad span must cover at least 75% of YOLO bbox width and height
+            # Quad span must cover at least 50% of YOLO bbox width and height
             xs = corners_pts[:, 0]
             ys = corners_pts[:, 1]
             span_w = float(xs.max() - xs.min())
             span_h = float(ys.max() - ys.min())
-            if span_w < 0.75 * bbox.width or span_h < 0.75 * bbox.height:
+            if span_w < 0.50 * bbox.width or span_h < 0.50 * bbox.height:
                 return False
             return True
 

@@ -25,9 +25,8 @@ def mm_to_px(mm: float, dpi: int) -> int:
 class PerspectiveWarper:
     """Handles perspective transformation of booklet images."""
 
-    def __init__(self, dpi: int = TARGET_DPI, mode: str = "bw") -> None:
+    def __init__(self, dpi: int = TARGET_DPI) -> None:
         self.dpi = dpi
-        self.mode = mode.lower()
         self.page_w_px = mm_to_px(PAGE_WIDTH_MM, self.dpi)
         self.page_h_px = mm_to_px(PAGE_HEIGHT_MM, self.dpi)
 
@@ -113,27 +112,31 @@ class PerspectiveWarper:
         
         return left_page, right_page
 
-    def enhance_scan(self, page_image: np.ndarray, mode: Optional[str] = None) -> np.ndarray:
+    def enhance_scan(self, page_image: np.ndarray) -> np.ndarray:
         """
-        FR-2.5: Light Text Enhancement (Adobe Scan style).
-        Supports:
-          - mode='bw' (default): High-contrast monochrome black & white. Pure white paper (#FFFFFF)
-                                with deep dark black ink/pencil, bleed-through suppression, and sharp strokes.
-          - mode='color': Pure white paper with original ink preservation (vibrant blue/red/black).
+        FR-2.5: Light Text Enhancement with Original Ink Preservation (Adobe Scan style).
+        
+        1. Estimates smooth 2D background illumination surface per channel 
+           via downsampled upper-percentile block grid + Gaussian smoothing.
+        2. Divides each channel by background to remove shadows, lighting gradients, 
+           and yellowed/gray paper background.
+        3. Applies a soft threshold and sub-linear boost (Light Text curve) to lift 
+           faint pencil, light ballpoint, and faded strokes into dark, legible text.
+        4. Fades saturation to 0 on pure paper (pure white #FFFFFF), while boosting
+           saturation on ink strokes (blue pen stays rich blue, red stays red).
+        5. Applies mild unsharp mask for crisp stroke edges.
         """
         if page_image is None or page_image.size == 0:
             return page_image
 
-        enh_mode = (mode or self.mode).lower()
-
         try:
-            # Ensure 3-channel BGR input
+            # Ensure 3-channel BGR
             if len(page_image.shape) == 2:
                 page_image = cv2.cvtColor(page_image, cv2.COLOR_GRAY2BGR)
 
             h, w = page_image.shape[:2]
 
-            # 1. Background illumination estimation on downsampled image
+            # 1. Background illumination estimation
             target_w = 600
             scale = target_w / float(w)
             target_h = max(1, int(h * scale))
@@ -142,89 +145,56 @@ class PerspectiveWarper:
             block_size = 24
             grid_h = int(np.ceil(target_h / block_size))
             grid_w = int(np.ceil(target_w / block_size))
+            bg_grid = np.zeros((grid_h, grid_w, 3), dtype=np.float32)
 
-            if enh_mode == "bw":
-                # --- BLACK & WHITE MODE ---
-                gray_small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float32)
-                bg_grid = np.zeros((grid_h, grid_w), dtype=np.float32)
-
+            for ch in range(3):
+                channel = small[:, :, ch].astype(np.float32)
                 for r in range(grid_h):
                     r_start = r * block_size
                     r_end = min((r + 1) * block_size, target_h)
                     for c in range(grid_w):
                         c_start = c * block_size
                         c_end = min((c + 1) * block_size, target_w)
-                        block = gray_small[r_start:r_end, c_start:c_end]
+                        block = channel[r_start:r_end, c_start:c_end]
                         if block.size > 0:
-                            bg_grid[r, c] = np.percentile(block, 92)
+                            bg_grid[r, c, ch] = np.percentile(block, 92)
 
-                bg_grid = cv2.GaussianBlur(bg_grid, (3, 3), 0)
-                bg_full = cv2.resize(bg_grid, (w, h), interpolation=cv2.INTER_CUBIC)
-                bg_full = np.maximum(bg_full, 1.0)
+            for ch in range(3):
+                bg_grid[:, :, ch] = cv2.GaussianBlur(bg_grid[:, :, ch], (3, 3), 0)
 
-                # Divide grayscale by background map
-                gray_full = cv2.cvtColor(page_image, cv2.COLOR_BGR2GRAY).astype(np.float32)
-                norm = np.clip((gray_full / bg_full) * 255.0, 0.0, 255.0)
+            bg_full = cv2.resize(bg_grid, (w, h), interpolation=cv2.INTER_CUBIC)
+            bg_full = np.maximum(bg_full, 1.0)
 
-                # Bleed-through suppression (diff < 10) and light text boost
-                diff = np.maximum(0.0, 246.0 - norm)
-                ink_score = np.clip((diff - 10.0) / (246.0 - 10.0 - 30.0), 0.0, 1.0)
-                ink_boosted = np.power(ink_score, 0.65)
+            # 2. Divide each channel by its background illumination (paper -> ~255)
+            norm = np.clip((page_image.astype(np.float32) / bg_full) * 255.0, 0.0, 255.0)
 
-                # Pure white paper (255) and deep solid black text (< 25)
-                bw_v = np.clip((1.0 - ink_boosted * 0.95) * 255.0, 0.0, 255.0).astype(np.uint8)
+            # 3. Light Text contrast boost in HSV color space
+            norm_uint8 = norm.astype(np.uint8)
+            hsv = cv2.cvtColor(norm_uint8, cv2.COLOR_BGR2HSV).astype(np.float32)
 
-                # Subtle unsharp mask for razor-sharp characters
-                blur = cv2.GaussianBlur(bw_v, (0, 0), 1.0)
-                crisp = cv2.addWeighted(bw_v, 1.25, blur, -0.25, 0)
+            H = hsv[:, :, 0]
+            S = hsv[:, :, 1]
+            V = hsv[:, :, 2]
 
-                # Return 3-channel BGR representation for universal pipeline compatibility
-                return cv2.cvtColor(crisp, cv2.COLOR_GRAY2BGR)
+            # Suppress back-of-page bleed-through (diff < 10), boost light ink/pencil
+            diff = np.maximum(0.0, 246.0 - V)
+            ink_score = np.clip((diff - 10.0) / (246.0 - 10.0 - 30.0), 0.0, 1.0)
+            ink_boosted = np.power(ink_score, 0.70)
 
-            else:
-                # --- COLOR MODE (Original Ink Preservation) ---
-                bg_grid = np.zeros((grid_h, grid_w, 3), dtype=np.float32)
-                for ch in range(3):
-                    channel = small[:, :, ch].astype(np.float32)
-                    for r in range(grid_h):
-                        r_start = r * block_size
-                        r_end = min((r + 1) * block_size, target_h)
-                        for c in range(grid_w):
-                            c_start = c * block_size
-                            c_end = min((c + 1) * block_size, target_w)
-                            block = channel[r_start:r_end, c_start:c_end]
-                            if block.size > 0:
-                                bg_grid[r, c, ch] = np.percentile(block, 92)
+            V_new = np.clip((1.0 - ink_boosted * 0.90) * 255.0, 0.0, 255.0)
 
-                for ch in range(3):
-                    bg_grid[:, :, ch] = cv2.GaussianBlur(bg_grid[:, :, ch], (3, 3), 0)
+            # Pure white paper (sat=0) + rich vibrant ink color
+            sat_mask = np.clip(ink_score * 4.0, 0.0, 1.0)
+            S_new = np.clip(S * 1.4 * sat_mask, 0.0, 255.0)
 
-                bg_full = cv2.resize(bg_grid, (w, h), interpolation=cv2.INTER_CUBIC)
-                bg_full = np.maximum(bg_full, 1.0)
+            out_hsv = cv2.merge([H, S_new, V_new]).astype(np.uint8)
+            out_bgr = cv2.cvtColor(out_hsv, cv2.COLOR_HSV2BGR)
 
-                norm = np.clip((page_image.astype(np.float32) / bg_full) * 255.0, 0.0, 255.0)
-                norm_uint8 = norm.astype(np.uint8)
-                hsv = cv2.cvtColor(norm_uint8, cv2.COLOR_BGR2HSV).astype(np.float32)
+            # 4. Subtle unsharp mask for crisp stroke edges
+            blur = cv2.GaussianBlur(out_bgr, (0, 0), 1.0)
+            crisp = cv2.addWeighted(out_bgr, 1.25, blur, -0.25, 0)
 
-                H = hsv[:, :, 0]
-                S = hsv[:, :, 1]
-                V = hsv[:, :, 2]
-
-                diff = np.maximum(0.0, 246.0 - V)
-                ink_score = np.clip((diff - 10.0) / (246.0 - 10.0 - 30.0), 0.0, 1.0)
-                ink_boosted = np.power(ink_score, 0.70)
-
-                V_new = np.clip((1.0 - ink_boosted * 0.90) * 255.0, 0.0, 255.0)
-                sat_mask = np.clip(ink_score * 4.0, 0.0, 1.0)
-                S_new = np.clip(S * 1.4 * sat_mask, 0.0, 255.0)
-
-                out_hsv = cv2.merge([H, S_new, V_new]).astype(np.uint8)
-                out_bgr = cv2.cvtColor(out_hsv, cv2.COLOR_HSV2BGR)
-
-                blur = cv2.GaussianBlur(out_bgr, (0, 0), 1.0)
-                crisp = cv2.addWeighted(out_bgr, 1.25, blur, -0.25, 0)
-
-                return crisp
+            return crisp
         except Exception as e:
             logger.error(f"Failed to enhance scan with Light Text filter: {e}")
             return page_image
