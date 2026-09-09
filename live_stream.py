@@ -77,34 +77,8 @@ def check_image_quality(frame: np.ndarray) -> tuple[bool, float, float, str]:
     return True, sharpness, glare_frac, "OK"
 
 # ═══════════════════════════════════════════════════════════════════════
-# Old OpenCV contour-only detection  (for comparison)
 # ═══════════════════════════════════════════════════════════════════════
-
-def opencv_contour_detect(frame: np.ndarray, min_area_ratio: float = 0.05) -> tuple[np.ndarray | None, int, float]:
-    t0 = time.perf_counter()
-    h, w = frame.shape[:2]
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    num_pts = 0
-    corners = None
-    
-    if contours:
-        largest = max(contours, key=cv2.contourArea)
-        if cv2.contourArea(largest) >= min_area_ratio * h * w:
-            epsilon = 0.02 * cv2.arcLength(largest, True)
-            approx = cv2.approxPolyDP(largest, epsilon, True)
-            num_pts = len(approx)
-            if num_pts == 4:
-                corners = CornerRefiner.order_corners(approx.reshape(4, 2).astype(np.float32))
-
-    return corners, num_pts, (time.perf_counter() - t0) * 1000.0
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Drawing helpers
+# Drawing & UI Helpers (YOLO Single-Panel)
 # ═══════════════════════════════════════════════════════════════════════
 
 def draw_yolo_geometry(vis: np.ndarray, result: DetectionResult) -> np.ndarray:
@@ -128,78 +102,58 @@ def draw_yolo_geometry(vis: np.ndarray, result: DetectionResult) -> np.ndarray:
         
     return vis
 
-def draw_cv_geometry(vis: np.ndarray, corners: np.ndarray | None) -> np.ndarray:
-    if corners is not None:
-        pts = corners.astype(np.int32)
-        for i in range(4):
-            p1, p2 = tuple(pts[i]), tuple(pts[(i + 1) % 4])
-            cv2.line(vis, p1, p2, MAGENTA, 2, cv2.LINE_AA)
-            cv2.circle(vis, p1, 7, RED, -1, cv2.LINE_AA)
-    return vis
 
-def build_yolo_panel(
-    vis_360: np.ndarray,
+def build_scanner_panel(
+    vis: np.ndarray,
     result: DetectionResult,
     fps: float,
     frame_count: int,
     conf_thresh: float,
     auto_enabled: bool = True,
 ) -> np.ndarray:
-    """Builds the 640x492 panel by vertically stacking the 40px top bar, 360px video, and 92px bottom bar."""
-    # Central warning on video
+    """Builds the single-panel UI by vertically stacking top header, video, and bottom footer."""
+    h, w = vis.shape[:2]
+
+    # Central warning on video if no booklet detected
     if ReviewFlag.NO_DETECTION in result.review_flags:
         text = "NO BOOKLET DETECTED"
-        tsize = cv2.getTextSize(text, FONT, 0.8, 2)[0]
-        cv2.putText(vis_360, text, ((640 - tsize[0]) // 2, 180), FONT, 0.8, RED, 2)
-        
-    # Top Bar (640 x 40)
-    top_bar = np.full((40, 640, 3), DARK_BG, dtype=np.uint8)
-    cv2.putText(top_bar, "YOLO11 Detection (NEW)", (10, 26), FONT, 0.7, GREEN, 2)
-    
-    # Auto-Capture toggle indicator
-    auto_label = "[A] Auto: ON" if auto_enabled else "[A] Auto: OFF"
+        tsize = cv2.getTextSize(text, FONT, 0.9, 2)[0]
+        cv2.putText(vis, text, ((w - tsize[0]) // 2, h // 2), FONT, 0.9, RED, 2)
+
+    # Top Bar (w x 42)
+    top_bar = np.full((42, w, 3), DARK_BG, dtype=np.uint8)
+    cv2.putText(top_bar, "VEE Scanner — YOLO11 Detection", (14, 28), FONT, 0.75, GREEN, 2)
+
+    # Auto-Capture toggle indicator in center
+    auto_label = "[A] Auto-Capture: ON" if auto_enabled else "[A] Auto-Capture: OFF"
     auto_col = GREEN if auto_enabled else (120, 120, 120)
-    cv2.putText(top_bar, auto_label, (290, 26), FONT_SMALL, 1.1, auto_col, 1)
+    auto_size = cv2.getTextSize(auto_label, FONT_SMALL, 1.2, 1)[0]
+    cv2.putText(top_bar, auto_label, ((w - auto_size[0]) // 2, 28), FONT_SMALL, 1.2, auto_col, 1)
 
-    cv2.putText(top_bar, f"FPS: {fps:.1f} | Frame: {frame_count}", (450, 16), FONT_SMALL, 0.9, YELLOW, 1)
-    cv2.putText(top_bar, f"Conf >= {conf_thresh:.2f}", (450, 32), FONT_SMALL, 0.9, WHITE, 1)
-    
-    # Bottom Bar (640 x 92)
+    # Stats on right
+    stats_txt = f"FPS: {fps:.1f} | Frame: {frame_count} | Conf >= {conf_thresh:.2f}"
+    stats_size = cv2.getTextSize(stats_txt, FONT_SMALL, 1.0, 1)[0]
+    cv2.putText(top_bar, stats_txt, (w - stats_size[0] - 14, 28), FONT_SMALL, 1.0, YELLOW, 1)
+
+    # Bottom Bar (w x 76)
     bg_color = DARK_RED if result.needs_review else DARK_BG
-    bot_bar = np.full((92, 640, 3), bg_color, dtype=np.uint8)
-    
-    c_val = f"{result.confidence:.3f}" if result.confidence > 0 else "0.000"
-    cv2.putText(bot_bar, f"Method: {result.detection_method.value}", (10, 20), FONT_SMALL, 1.0, WHITE, 1)
-    cv2.putText(bot_bar, f"Conf: {c_val} | Latency: {result.latency_ms:.0f}ms", (10, 40), FONT_SMALL, 1.0, ORANGE, 1)
-    
-    flags = [f.value for f in result.review_flags]
-    if not flags: flags = ["none"]
-    cv2.putText(bot_bar, f"Flags: [{','.join(flags)}]", (10, 60), FONT_SMALL, 1.0, ORANGE, 1)
-    
-    if result.needs_review:
-        cv2.putText(bot_bar, "! NEEDS REVIEW - REPOSITION", (280, 45), FONT, 0.6, RED, 2)
-        
-    return np.vstack([top_bar, vis_360, bot_bar])
+    bot_bar = np.full((76, w, 3), bg_color, dtype=np.uint8)
 
-def build_cv_panel(vis_360: np.ndarray, corners: np.ndarray | None, num_pts: int, elapsed_ms: float) -> np.ndarray:
-    """Builds the 640x492 panel by vertically stacking the 40px top bar, 360px video, and 92px bottom bar."""
-    if corners is None:
-        text = "FAILED"
-        tsize = cv2.getTextSize(text, FONT, 0.8, 2)[0]
-        cv2.putText(vis_360, text, ((640 - tsize[0]) // 2, 180), FONT, 0.8, RED, 2)
-        
-    # Top Bar (640 x 40)
-    top_bar = np.full((40, 640, 3), DARK_BG, dtype=np.uint8)
-    cv2.putText(top_bar, "OpenCV Contour (OLD)", (10, 26), FONT, 0.7, RED, 2)
-    
-    # Bottom Bar (640 x 92)
-    bot_bar = np.full((92, 640, 3), DARK_BG, dtype=np.uint8)
-    if corners is not None:
-        cv2.putText(bot_bar, f"4-pt contour ({elapsed_ms:.1f}ms)", (10, 20), FONT_SMALL, 1.0, GREEN, 1)
+    c_val = f"{result.confidence:.3f}" if result.confidence > 0 else "0.000"
+    flags = [f.value for f in result.review_flags]
+    if not flags:
+        flags = ["ok"]
+
+    line1 = f"Method: {result.detection_method.value}  |  Conf: {c_val}  |  Latency: {result.latency_ms:.0f}ms  |  Flags: [{','.join(flags)}]"
+    cv2.putText(bot_bar, line1, (14, 26), FONT_SMALL, 1.1, WHITE, 1)
+
+    if result.needs_review:
+        cv2.putText(bot_bar, "! NEEDS REVIEW - REPOSITION BOOKLET", (14, 56), FONT, 0.65, RED, 2)
     else:
-        cv2.putText(bot_bar, f"No 4-pt fit ({num_pts} pts, {elapsed_ms:.0f}ms)", (10, 20), FONT_SMALL, 1.0, YELLOW, 1)
-        
-    return np.vstack([top_bar, vis_360, bot_bar])
+        controls_txt = "[A] Auto ON/OFF  |  [S] Manual Capture  |  [W] Warped View  |  [C] Train Snap  |  [+/-] Conf  |  [Q] Quit"
+        cv2.putText(bot_bar, controls_txt, (14, 56), FONT_SMALL, 1.0, (180, 180, 180), 1)
+
+    return np.vstack([top_bar, vis, bot_bar])
 
 # ═══════════════════════════════════════════════════════════════════════
 # Main loop
@@ -221,13 +175,17 @@ class ThreadedCamera:
 
     def _update(self):
         while self.running:
-            ret, frame = self.cap.read()
-            with self.lock:
-                self.ret = ret
-                if ret:
+            # Drain internal stream buffer with grab() to guarantee zero lag/latency
+            if not self.cap.grab():
+                time.sleep(0.005)
+                continue
+            ret, frame = self.cap.retrieve()
+            if ret:
+                with self.lock:
+                    self.ret = ret
                     self.frame = frame
-            if not ret:
-                time.sleep(0.01)
+            else:
+                time.sleep(0.005)
 
     def isOpened(self):
         return self.cap.isOpened()
@@ -302,7 +260,7 @@ def play_shutter_sound() -> None:
 
 
 def draw_auto_capture_hud(
-    vis_360: np.ndarray,
+    vis: np.ndarray,
     state: AutoCaptureState,
     progress: float,
     status_msg: str,
@@ -313,79 +271,79 @@ def draw_auto_capture_hud(
     spread_count: int = 0,
 ) -> np.ndarray:
     """Draws auto-capture progress bar, status, and capture flash HUD."""
-    h, w = vis_360.shape[:2]
+    h, w = vis.shape[:2]
 
     # Flash banner on capture
     if flash_active:
-        cv2.rectangle(vis_360, (0, 0), (w - 1, h - 1), GREEN, 6)
-        banner_w, banner_h = 380, 42
+        cv2.rectangle(vis, (0, 0), (w - 1, h - 1), GREEN, 6)
+        banner_w, banner_h = min(460, int(w * 0.5)), 46
         bx1 = (w - banner_w) // 2
         by1 = 40
-        cv2.rectangle(vis_360, (bx1, by1), (bx1 + banner_w, by1 + banner_h), (0, 140, 0), -1)
-        cv2.rectangle(vis_360, (bx1, by1), (bx1 + banner_w, by1 + banner_h), WHITE, 2)
+        cv2.rectangle(vis, (bx1, by1), (bx1 + banner_w, by1 + banner_h), (0, 140, 0), -1)
+        cv2.rectangle(vis, (bx1, by1), (bx1 + banner_w, by1 + banner_h), WHITE, 2)
         if frames_per_booklet:
             text = f"CAPTURED! B#{booklet_idx:02d} F{spread_count}/{frames_per_booklet} (P#{page_count})"
         else:
             text = f"CAPTURED! PAGE #{page_count}"
-        tsize = cv2.getTextSize(text, FONT, 0.65, 2)[0]
-        cv2.putText(vis_360, text, (bx1 + (banner_w - tsize[0]) // 2, by1 + 28), FONT, 0.65, WHITE, 2)
-        return vis_360
+        tsize = cv2.getTextSize(text, FONT, 0.7, 2)[0]
+        cv2.putText(vis, text, (bx1 + (banner_w - tsize[0]) // 2, by1 + 30), FONT, 0.7, WHITE, 2)
+        return vis
 
     if frames_per_booklet is not None:
         b_tag = f"Booklet #{booklet_idx:02d} | Spread {spread_count}/{frames_per_booklet}"
         tsize = cv2.getTextSize(b_tag, FONT_SMALL, 1.0, 1)[0]
-        cv2.putText(vis_360, b_tag, (w - tsize[0] - 12, 25), FONT_SMALL, 1.0, CYAN, 1)
+        cv2.putText(vis, b_tag, (w - tsize[0] - 14, 25), FONT_SMALL, 1.0, CYAN, 1)
 
     if state == AutoCaptureState.STABILIZING:
-        bar_x = 140
-        bar_y = h - 35
-        bar_w = 360
-        bar_h = 24
-        cv2.rectangle(vis_360, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), DARK_BG, -1)
+        bar_w = min(420, int(w * 0.45))
+        bar_x = (w - bar_w) // 2
+        bar_y = h - 40
+        bar_h = 26
+        cv2.rectangle(vis, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), DARK_BG, -1)
         fill_w = int(max(0.0, min(1.0, progress)) * (bar_w - 4))
         fill_color = GREEN if progress >= 0.8 else CYAN
         if fill_w > 0:
-            cv2.rectangle(vis_360, (bar_x + 2, bar_y + 2), (bar_x + 2 + fill_w, bar_y + bar_h - 2), fill_color, -1)
-        cv2.rectangle(vis_360, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), WHITE, 1)
+            cv2.rectangle(vis, (bar_x + 2, bar_y + 2), (bar_x + 2 + fill_w, bar_y + bar_h - 2), fill_color, -1)
+        cv2.rectangle(vis, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), WHITE, 1)
         pct = int(progress * 100)
         label = f"Auto-Capture: {pct}%"
         tsize = cv2.getTextSize(label, FONT_SMALL, 1.0, 1)[0]
-        cv2.putText(vis_360, label, (bar_x + (bar_w - tsize[0]) // 2, bar_y + 16), FONT_SMALL, 1.0, WHITE, 1)
+        cv2.putText(vis, label, (bar_x + (bar_w - tsize[0]) // 2, bar_y + 18), FONT_SMALL, 1.0, WHITE, 1)
 
     elif state == AutoCaptureState.WAITING_FOR_PAGE_TURN:
-        bar_x = 160
-        bar_y = h - 35
-        bar_w = 320
-        bar_h = 24
-        cv2.rectangle(vis_360, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (40, 40, 80), -1)
-        cv2.rectangle(vis_360, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), YELLOW, 1)
+        bar_w = min(360, int(w * 0.4))
+        bar_x = (w - bar_w) // 2
+        bar_y = h - 40
+        bar_h = 26
+        cv2.rectangle(vis, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (40, 40, 80), -1)
+        cv2.rectangle(vis, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), YELLOW, 1)
         label = "Turn to next page..."
         tsize = cv2.getTextSize(label, FONT_SMALL, 1.0, 1)[0]
-        cv2.putText(vis_360, label, (bar_x + (bar_w - tsize[0]) // 2, bar_y + 16), FONT_SMALL, 1.0, YELLOW, 1)
+        cv2.putText(vis, label, (bar_x + (bar_w - tsize[0]) // 2, bar_y + 18), FONT_SMALL, 1.0, YELLOW, 1)
 
-    return vis_360
+    return vis
 
 
 def execute_capture(
     frame: np.ndarray,
     result: DetectionResult,
-    warped: Optional[np.ndarray],
     args: argparse.Namespace,
     detector: BookletDetector,
     warper: PerspectiveWarper,
     session: BookletCaptureSession,
     auto_controller: AutoCaptureController,
     is_auto: bool = False,
+    cached_warped: Optional[np.ndarray] = None,
 ) -> bool:
     """Executes spread capture, high-res fallback, warp, PDF update, and shutter audio."""
-    if warped is None or result.corners is None:
+    if result.corners is None:
         return False
 
     high_res_frame = capture_high_res_frame(args)
     if high_res_frame is not None:
         hr_result = detector.detect(high_res_frame)
         if hr_result.corners is not None:
-            warped_to_save = warper.warp_adaptive(high_res_frame, hr_result.corners.as_float32())
+            warped_to_save = warper.warp_adaptive(high_res_frame, hr_result.corners.as_float32(), high_quality=True)
         else:
             h_orig, w_orig = frame.shape[:2]
             h_high, w_high = high_res_frame.shape[:2]
@@ -394,12 +352,18 @@ def execute_capture(
             corners_scaled = result.corners.as_float32().copy()
             corners_scaled[:, 0] *= scale_x
             corners_scaled[:, 1] *= scale_y
-            warped_to_save = warper.warp_adaptive(high_res_frame, corners_scaled)
+            warped_to_save = warper.warp_adaptive(high_res_frame, corners_scaled, high_quality=True)
         raw_to_save = high_res_frame
         print(f"\n  ✨ High-res capture successful: {high_res_frame.shape[1]}x{high_res_frame.shape[0]}")
     else:
-        warped_to_save = warped
+        if cached_warped is not None:
+            warped_to_save = cached_warped
+        else:
+            warped_to_save = warper.warp_adaptive(frame, result.corners.as_float32(), high_quality=True)
         raw_to_save = frame
+
+    if warped_to_save is None:
+        return False
 
     saved_pages = session.add_spread(warped_to_save, raw_frame=raw_to_save)
     tag = "🤖 Auto-Capture" if is_auto else "📸 Manual Capture"
@@ -462,7 +426,7 @@ def main() -> None:
     parser.add_argument("--model", type=str, default="yolo11n.pt")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--conf", type=float, default=0.25)
-    parser.add_argument("--scale", type=float, default=1.5)
+    parser.add_argument("--scale", type=float, default=1.0, help="Display scaling factor (default: 1.0)")
     parser.add_argument("--auto", dest="auto_capture", action="store_true", default=True, help="Enable auto-capture (default: True)")
     parser.add_argument("--no-auto", dest="auto_capture", action="store_false", help="Disable auto-capture")
     parser.add_argument("--auto-delay", type=float, default=1.0, help="Hold duration in seconds for auto-capture (default: 1.0s)")
@@ -475,7 +439,7 @@ def main() -> None:
     dataset_dir  = project_root / "training" / "dataset"
 
     print("\n" + "=" * 62)
-    print("  VEE Scanner — Live Booklet Detection")
+    print("  VEE Scanner — Live Booklet Detection (YOLO11)")
     print("=" * 62)
 
     config = DetectorConfig(model_path=args.model, device=args.device, confidence_threshold=args.conf)
@@ -513,7 +477,7 @@ def main() -> None:
         except Exception:
             pass
 
-    WINDOW_NAME = "VEE Scanner - Dual Panel"
+    WINDOW_NAME = "VEE Scanner — YOLO11 Live Detection"
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
     print("  Stream connected.")
     print("  Controls:")
@@ -530,7 +494,7 @@ def main() -> None:
             t_frame = time.perf_counter()
             ret, frame = cap.read()
             if not ret:
-                time.sleep(0.05)
+                time.sleep(0.01)
                 continue
 
             frame_count += 1
@@ -538,7 +502,7 @@ def main() -> None:
             # Quality Gate
             q_pass, q_sharpness, q_glare, q_reason = check_image_quality(frame)
 
-            # 1. Detect YOLO
+            # 1. Detect YOLO + Corner Refinement
             if q_pass:
                 result = detector.detect(frame)
                 
@@ -559,7 +523,6 @@ def main() -> None:
                 else:
                     prev_corners = None
 
-                warped = warper.warp_adaptive(frame, result.corners.as_float32()) if result.corners is not None else None
                 yolo_vis = draw_yolo_geometry(frame.copy(), result)
             else:
                 result = DetectionResult(
@@ -569,18 +532,9 @@ def main() -> None:
                     needs_review=False, hands_detected=[], clutter_detected=[],
                     latency_ms=0.0, raw_detections=[], frame_shape=frame.shape[:2]
                 )
-                warped = None
                 yolo_vis = frame.copy()
 
-            # 2. Detect OpenCV
-            if q_pass:
-                cv_corners, cv_pts, cv_ms = opencv_contour_detect(frame)
-                cv_vis = draw_cv_geometry(frame.copy(), cv_corners)
-            else:
-                cv_corners, cv_pts, cv_ms = None, 0, 0.0
-                cv_vis = frame.copy()
-
-            # 2b. Auto-Capture evaluation
+            # 2. Auto-Capture evaluation
             auto_state = AutoCaptureState.DISABLED
             auto_prog = 0.0
             auto_msg = "Auto: OFF [A]"
@@ -589,19 +543,18 @@ def main() -> None:
                 should_auto_capture, auto_state, auto_prog, auto_msg = auto_controller.update(
                     result, q_pass=q_pass, dt=dt_step
                 )
-                if should_auto_capture and warped is not None and result.corners is not None:
+                if should_auto_capture and result.corners is not None:
                     flash_timer = 1.0
                     execute_capture(
-                        frame, result, warped, args, detector, warper, session, auto_controller, is_auto=True
+                        frame, result, args, detector, warper, session, auto_controller, is_auto=True
                     )
 
-            # 3. Resize videos to proper 16:9 ratio (640x360) BEFORE adding headers/footers
-            yp_360 = cv2.resize(yolo_vis, (640, 360))
-            cp_360 = cv2.resize(cv_vis, (640, 360))
+            # 3. Resize video to single 960x540 display canvas
+            yp_vis = cv2.resize(yolo_vis, (960, 540))
             
             # Draw Auto-Capture HUD (progress bar / countdown / flash banner)
             draw_auto_capture_hud(
-                yp_360,
+                yp_vis,
                 auto_state,
                 auto_prog,
                 auto_msg,
@@ -614,19 +567,15 @@ def main() -> None:
             if 'elapsed' in locals() and elapsed > 0:
                 flash_timer = max(0.0, flash_timer - elapsed)
 
-            # Add Quality Gate overlay to the YOLO panel
+            # Add Quality Gate overlay
             q_color = GREEN if q_pass else RED
-            cv2.putText(yp_360, f"Gate: {q_reason} | Sharp: {q_sharpness:.0f} | Glare: {q_glare:.1%}", (10, 25), FONT_SMALL, 1.2, q_color, 2)
+            cv2.putText(yp_vis, f"Gate: {q_reason} | Sharp: {q_sharpness:.0f} | Glare: {q_glare:.1%}", (14, 25), FONT_SMALL, 1.2, q_color, 2)
 
-            # 4. Build Panels (stacks 40px header + 360px video + 92px footer = 492px)
+            # 4. Build single-panel interface (header + video + footer)
             fps = 1.0 / (sum(fps_history) / len(fps_history)) if fps_history else 0.0
-            yp = build_yolo_panel(yp_360, result, fps, frame_count, conf_thresh, auto_enabled=auto_controller.enabled)
-            cp = build_cv_panel(cp_360, cv_corners, cv_pts, cv_ms)
+            display = build_scanner_panel(yp_vis, result, fps, frame_count, conf_thresh, auto_enabled=auto_controller.enabled)
 
-            # 5. Stack horizontally -> exact 1280x492 base layout
-            display = np.hstack([yp, cp])
-            
-            # 6. Scale up the final image to make the window physically larger on screen
+            # 5. Optional display scaling
             if args.scale != 1.0:
                 display = cv2.resize(display, None, fx=args.scale, fy=args.scale, interpolation=cv2.INTER_LINEAR)
 
@@ -635,13 +584,16 @@ def main() -> None:
 
             cv2.imshow(WINDOW_NAME, display)
 
-            if show_warp and warped is not None:
-                warp_disp = warped.copy()
-                scale = min(600 / warp_disp.shape[0], 500 / warp_disp.shape[1])
-                if scale < 1:
-                    warp_disp = cv2.resize(warp_disp, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-                cv2.imshow("Warped Booklet", warp_disp)
-            elif show_warp and warped is None:
+            # Optional warped preview window (fast linear interpolation, on-demand only)
+            if show_warp and result.corners is not None:
+                warped_preview = warper.warp_adaptive(frame, result.corners.as_float32(), high_quality=False)
+                if warped_preview is not None:
+                    warp_disp = warped_preview.copy()
+                    scale = min(600 / warp_disp.shape[0], 500 / warp_disp.shape[1])
+                    if scale < 1:
+                        warp_disp = cv2.resize(warp_disp, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+                    cv2.imshow("Warped Booklet", warp_disp)
+            elif show_warp and result.corners is None:
                 blank = np.full((200, 400, 3), 40, dtype=np.uint8)
                 cv2.putText(blank, "No booklet detected", (40, 110), FONT, 0.7, RED, 2)
                 cv2.imshow("Warped Booklet", blank)
@@ -655,13 +607,13 @@ def main() -> None:
                 show_warp = not show_warp
                 if not show_warp: cv2.destroyWindow("Warped Booklet")
             elif key in (ord('s'), ord('S')):
-                if warped is not None and result.corners is not None:
+                if result.corners is not None:
                     flash_timer = 1.0
                     execute_capture(
-                        frame, result, warped, args, detector, warper, session, auto_controller, is_auto=False
+                        frame, result, args, detector, warper, session, auto_controller, is_auto=False
                     )
                 else:
-                    saved = save_frame(frame, yolo_vis, warped, output_dir)
+                    saved = save_frame(frame, yolo_vis, None, output_dir)
                     print(f"\n  ⚠️ No booklet detected to split. Saved raw snapshot: {saved.name}.jpg\n")
             elif key in (ord('c'), ord('C')): capture_training_frame(frame, dataset_dir)
             elif key in (ord('+'), ord('=')):

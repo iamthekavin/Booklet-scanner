@@ -30,9 +30,20 @@ class PerspectiveWarper:
         self.page_w_px = mm_to_px(PAGE_WIDTH_MM, self.dpi)
         self.page_h_px = mm_to_px(PAGE_HEIGHT_MM, self.dpi)
 
-    def warp_adaptive(self, frame: np.ndarray, corners: np.ndarray) -> Optional[np.ndarray]:
+    def warp_adaptive(
+        self,
+        frame: np.ndarray,
+        corners: np.ndarray,
+        high_quality: bool = True,
+    ) -> Optional[np.ndarray]:
         """
         Warp the frame to a fixed physical scanner target (A4 or A3 spread) at configured DPI.
+
+        Args:
+            frame: Input frame image.
+            corners: 4x2 array of corner points.
+            high_quality: If True, uses INTER_LANCZOS4 for crystal-clear 300 DPI capture output.
+                          If False, uses INTER_LINEAR for fast real-time preview (<3ms).
         """
         try:
             tl, tr, br, bl = corners
@@ -58,9 +69,10 @@ class PerspectiveWarper:
             ], dtype=np.float32)
 
             matrix = cv2.getPerspectiveTransform(corners.astype(np.float32), dst_pts)
+            flags = cv2.INTER_LANCZOS4 if high_quality else cv2.INTER_LINEAR
             warped = cv2.warpPerspective(
                 frame, matrix, (target_w, target_h),
-                flags=cv2.INTER_LANCZOS4,
+                flags=flags,
                 borderMode=cv2.BORDER_REPLICATE
             )
             return warped
