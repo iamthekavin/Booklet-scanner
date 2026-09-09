@@ -110,6 +110,8 @@ def build_scanner_panel(
     frame_count: int,
     conf_thresh: float,
     auto_enabled: bool = True,
+    top_h: int = 42,
+    bot_h: int = 76,
 ) -> np.ndarray:
     """Builds the single-panel UI by vertically stacking top header, video, and bottom footer."""
     h, w = vis.shape[:2]
@@ -117,27 +119,31 @@ def build_scanner_panel(
     # Central warning on video if no booklet detected
     if ReviewFlag.NO_DETECTION in result.review_flags:
         text = "NO BOOKLET DETECTED"
-        tsize = cv2.getTextSize(text, FONT, 0.9, 2)[0]
-        cv2.putText(vis, text, ((w - tsize[0]) // 2, h // 2), FONT, 0.9, RED, 2)
+        scale = 1.0 if w >= 1280 else 0.8
+        tsize = cv2.getTextSize(text, FONT, scale, 2)[0]
+        cv2.putText(vis, text, ((w - tsize[0]) // 2, h // 2), FONT, scale, RED, 2)
 
-    # Top Bar (w x 42)
-    top_bar = np.full((42, w, 3), DARK_BG, dtype=np.uint8)
-    cv2.putText(top_bar, "VEE Scanner — YOLO11 Detection", (14, 28), FONT, 0.75, GREEN, 2)
+    # Top Bar (w x top_h)
+    top_bar = np.full((top_h, w, 3), DARK_BG, dtype=np.uint8)
+    title_scale = 0.8 if w >= 1280 else 0.7
+    cv2.putText(top_bar, "VEE Scanner — YOLO11 Detection", (16, int(top_h * 0.68)), FONT, title_scale, GREEN, 2)
 
     # Auto-Capture toggle indicator in center
     auto_label = "[A] Auto-Capture: ON" if auto_enabled else "[A] Auto-Capture: OFF"
     auto_col = GREEN if auto_enabled else (120, 120, 120)
-    auto_size = cv2.getTextSize(auto_label, FONT_SMALL, 1.2, 1)[0]
-    cv2.putText(top_bar, auto_label, ((w - auto_size[0]) // 2, 28), FONT_SMALL, 1.2, auto_col, 1)
+    auto_scale = 1.2 if w >= 1280 else 1.1
+    auto_size = cv2.getTextSize(auto_label, FONT_SMALL, auto_scale, 1)[0]
+    cv2.putText(top_bar, auto_label, ((w - auto_size[0]) // 2, int(top_h * 0.68)), FONT_SMALL, auto_scale, auto_col, 1)
 
     # Stats on right
     stats_txt = f"FPS: {fps:.1f} | Frame: {frame_count} | Conf >= {conf_thresh:.2f}"
-    stats_size = cv2.getTextSize(stats_txt, FONT_SMALL, 1.0, 1)[0]
-    cv2.putText(top_bar, stats_txt, (w - stats_size[0] - 14, 28), FONT_SMALL, 1.0, YELLOW, 1)
+    stats_scale = 1.05 if w >= 1280 else 0.95
+    stats_size = cv2.getTextSize(stats_txt, FONT_SMALL, stats_scale, 1)[0]
+    cv2.putText(top_bar, stats_txt, (w - stats_size[0] - 16, int(top_h * 0.68)), FONT_SMALL, stats_scale, YELLOW, 1)
 
-    # Bottom Bar (w x 76)
+    # Bottom Bar (w x bot_h)
     bg_color = DARK_RED if result.needs_review else DARK_BG
-    bot_bar = np.full((76, w, 3), bg_color, dtype=np.uint8)
+    bot_bar = np.full((bot_h, w, 3), bg_color, dtype=np.uint8)
 
     c_val = f"{result.confidence:.3f}" if result.confidence > 0 else "0.000"
     flags = [f.value for f in result.review_flags]
@@ -145,13 +151,13 @@ def build_scanner_panel(
         flags = ["ok"]
 
     line1 = f"Method: {result.detection_method.value}  |  Conf: {c_val}  |  Latency: {result.latency_ms:.0f}ms  |  Flags: [{','.join(flags)}]"
-    cv2.putText(bot_bar, line1, (14, 26), FONT_SMALL, 1.1, WHITE, 1)
+    cv2.putText(bot_bar, line1, (16, int(bot_h * 0.36)), FONT_SMALL, 1.15 if w >= 1280 else 1.0, WHITE, 1)
 
     if result.needs_review:
-        cv2.putText(bot_bar, "! NEEDS REVIEW - REPOSITION BOOKLET", (14, 56), FONT, 0.65, RED, 2)
+        cv2.putText(bot_bar, "! NEEDS REVIEW - REPOSITION BOOKLET", (16, int(bot_h * 0.78)), FONT, 0.7, RED, 2)
     else:
-        controls_txt = "[A] Auto ON/OFF  |  [S] Manual Capture  |  [W] Warped View  |  [C] Train Snap  |  [+/-] Conf  |  [Q] Quit"
-        cv2.putText(bot_bar, controls_txt, (14, 56), FONT_SMALL, 1.0, (180, 180, 180), 1)
+        controls_txt = "[A] Auto ON/OFF  |  [S] Manual Capture  |  [F] Fullscreen  |  [W] Warped View  |  [C] Train Snap  |  [+/-] Conf  |  [Q] Quit"
+        cv2.putText(bot_bar, controls_txt, (16, int(bot_h * 0.78)), FONT_SMALL, 1.05 if w >= 1280 else 0.95, (190, 190, 190), 1)
 
     return np.vstack([top_bar, vis, bot_bar])
 
@@ -275,30 +281,30 @@ def draw_auto_capture_hud(
 
     # Flash banner on capture
     if flash_active:
-        cv2.rectangle(vis, (0, 0), (w - 1, h - 1), GREEN, 6)
-        banner_w, banner_h = min(460, int(w * 0.5)), 46
+        cv2.rectangle(vis, (0, 0), (w - 1, h - 1), GREEN, 8)
+        banner_w, banner_h = min(560, int(w * 0.52)), 52
         bx1 = (w - banner_w) // 2
-        by1 = 40
+        by1 = 45
         cv2.rectangle(vis, (bx1, by1), (bx1 + banner_w, by1 + banner_h), (0, 140, 0), -1)
         cv2.rectangle(vis, (bx1, by1), (bx1 + banner_w, by1 + banner_h), WHITE, 2)
         if frames_per_booklet:
             text = f"CAPTURED! B#{booklet_idx:02d} F{spread_count}/{frames_per_booklet} (P#{page_count})"
         else:
             text = f"CAPTURED! PAGE #{page_count}"
-        tsize = cv2.getTextSize(text, FONT, 0.7, 2)[0]
-        cv2.putText(vis, text, (bx1 + (banner_w - tsize[0]) // 2, by1 + 30), FONT, 0.7, WHITE, 2)
+        tsize = cv2.getTextSize(text, FONT, 0.75, 2)[0]
+        cv2.putText(vis, text, (bx1 + (banner_w - tsize[0]) // 2, by1 + 34), FONT, 0.75, WHITE, 2)
         return vis
 
     if frames_per_booklet is not None:
         b_tag = f"Booklet #{booklet_idx:02d} | Spread {spread_count}/{frames_per_booklet}"
-        tsize = cv2.getTextSize(b_tag, FONT_SMALL, 1.0, 1)[0]
-        cv2.putText(vis, b_tag, (w - tsize[0] - 14, 25), FONT_SMALL, 1.0, CYAN, 1)
+        tsize = cv2.getTextSize(b_tag, FONT_SMALL, 1.1, 1)[0]
+        cv2.putText(vis, b_tag, (w - tsize[0] - 16, 28), FONT_SMALL, 1.1, CYAN, 1)
 
     if state == AutoCaptureState.STABILIZING:
-        bar_w = min(420, int(w * 0.45))
+        bar_w = min(480, int(w * 0.45))
         bar_x = (w - bar_w) // 2
-        bar_y = h - 40
-        bar_h = 26
+        bar_y = h - 42
+        bar_h = 28
         cv2.rectangle(vis, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), DARK_BG, -1)
         fill_w = int(max(0.0, min(1.0, progress)) * (bar_w - 4))
         fill_color = GREEN if progress >= 0.8 else CYAN
@@ -307,19 +313,19 @@ def draw_auto_capture_hud(
         cv2.rectangle(vis, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), WHITE, 1)
         pct = int(progress * 100)
         label = f"Auto-Capture: {pct}%"
-        tsize = cv2.getTextSize(label, FONT_SMALL, 1.0, 1)[0]
-        cv2.putText(vis, label, (bar_x + (bar_w - tsize[0]) // 2, bar_y + 18), FONT_SMALL, 1.0, WHITE, 1)
+        tsize = cv2.getTextSize(label, FONT_SMALL, 1.1, 1)[0]
+        cv2.putText(vis, label, (bar_x + (bar_w - tsize[0]) // 2, bar_y + 19), FONT_SMALL, 1.1, WHITE, 1)
 
     elif state == AutoCaptureState.WAITING_FOR_PAGE_TURN:
-        bar_w = min(360, int(w * 0.4))
+        bar_w = min(400, int(w * 0.4))
         bar_x = (w - bar_w) // 2
-        bar_y = h - 40
-        bar_h = 26
+        bar_y = h - 42
+        bar_h = 28
         cv2.rectangle(vis, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (40, 40, 80), -1)
         cv2.rectangle(vis, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), YELLOW, 1)
         label = "Turn to next page..."
-        tsize = cv2.getTextSize(label, FONT_SMALL, 1.0, 1)[0]
-        cv2.putText(vis, label, (bar_x + (bar_w - tsize[0]) // 2, bar_y + 18), FONT_SMALL, 1.0, YELLOW, 1)
+        tsize = cv2.getTextSize(label, FONT_SMALL, 1.1, 1)[0]
+        cv2.putText(vis, label, (bar_x + (bar_w - tsize[0]) // 2, bar_y + 19), FONT_SMALL, 1.1, YELLOW, 1)
 
     return vis
 
@@ -427,6 +433,8 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--scale", type=float, default=1.0, help="Display scaling factor (default: 1.0)")
+    parser.add_argument("--fullscreen", action="store_true", default=False, help="Launch directly in true borderless fullscreen")
+    parser.add_argument("--res", type=str, default="1280x720", choices=["1280x720", "1920x1080"], help="Base UI canvas resolution (default: 1280x720)")
     parser.add_argument("--auto", dest="auto_capture", action="store_true", default=True, help="Enable auto-capture (default: True)")
     parser.add_argument("--no-auto", dest="auto_capture", action="store_false", help="Disable auto-capture")
     parser.add_argument("--auto-delay", type=float, default=1.0, help="Hold duration in seconds for auto-capture (default: 1.0s)")
@@ -470,19 +478,30 @@ def main() -> None:
         dup_hash_dist=args.dup_hash_dist,
     )
 
+    WINDOW_NAME = "VEE Scanner — YOLO11 Live Detection"
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+
+    # Determine screen resolution and maximize window to full window size
+    screen_w, screen_h = 1920, 1080
     if os.name == 'nt':
         try:
             import ctypes
             ctypes.windll.user32.SetProcessDPIAware()
+            screen_w = ctypes.windll.user32.GetSystemMetrics(0)
+            screen_h = ctypes.windll.user32.GetSystemMetrics(1)
         except Exception:
             pass
 
-    WINDOW_NAME = "VEE Scanner — YOLO11 Live Detection"
-    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
+    cv2.resizeWindow(WINDOW_NAME, screen_w, screen_h)
+    is_fullscreen = bool(args.fullscreen)
+    if is_fullscreen:
+        cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
     print("  Stream connected.")
     print("  Controls:")
     print("    A : Toggle Auto-Capture ON/OFF (hands-free scanning)")
     print("    S : Manual capture spread -> split & compile to PDF (FR-4.2)")
+    print("    F : Toggle Fullscreen / Maximized window")
     print("    W : Toggle warped booklet window")
     print("    C : Capture training frame")
     print("    +/- : Adjust confidence threshold")
@@ -549,8 +568,15 @@ def main() -> None:
                         frame, result, args, detector, warper, session, auto_controller, is_auto=True
                     )
 
-            # 3. Resize video to single 960x540 display canvas
-            yp_vis = cv2.resize(yolo_vis, (960, 540))
+            # 3. Resize video to fit 16:9 canvas (1280x720 or 1920x1080)
+            if args.res == "1920x1080":
+                canvas_w, canvas_h = 1920, 1080
+                top_h, bot_h = 50, 84
+            else:
+                canvas_w, canvas_h = 1280, 720
+                top_h, bot_h = 42, 76
+            video_h = canvas_h - top_h - bot_h
+            yp_vis = cv2.resize(yolo_vis, (canvas_w, video_h), interpolation=cv2.INTER_LINEAR)
             
             # Draw Auto-Capture HUD (progress bar / countdown / flash banner)
             draw_auto_capture_hud(
@@ -569,11 +595,11 @@ def main() -> None:
 
             # Add Quality Gate overlay
             q_color = GREEN if q_pass else RED
-            cv2.putText(yp_vis, f"Gate: {q_reason} | Sharp: {q_sharpness:.0f} | Glare: {q_glare:.1%}", (14, 25), FONT_SMALL, 1.2, q_color, 2)
+            cv2.putText(yp_vis, f"Gate: {q_reason} | Sharp: {q_sharpness:.0f} | Glare: {q_glare:.1%}", (16, 26), FONT_SMALL, 1.2, q_color, 2)
 
             # 4. Build single-panel interface (header + video + footer)
             fps = 1.0 / (sum(fps_history) / len(fps_history)) if fps_history else 0.0
-            display = build_scanner_panel(yp_vis, result, fps, frame_count, conf_thresh, auto_enabled=auto_controller.enabled)
+            display = build_scanner_panel(yp_vis, result, fps, frame_count, conf_thresh, auto_enabled=auto_controller.enabled, top_h=top_h, bot_h=bot_h)
 
             # 5. Optional display scaling
             if args.scale != 1.0:
@@ -583,6 +609,16 @@ def main() -> None:
             fps_history.append(elapsed)
 
             cv2.imshow(WINDOW_NAME, display)
+
+            # Auto-maximize window on Windows on first frame
+            if frame_count == 1 and not is_fullscreen and os.name == 'nt':
+                try:
+                    import ctypes
+                    hwnd = ctypes.windll.user32.FindWindowW(None, WINDOW_NAME)
+                    if hwnd:
+                        ctypes.windll.user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
+                except Exception:
+                    pass
 
             # Optional warped preview window (fast linear interpolation, on-demand only)
             if show_warp and result.corners is not None:
@@ -603,6 +639,22 @@ def main() -> None:
             elif key in (ord('a'), ord('A')):
                 enabled = auto_controller.toggle()
                 print(f"\n  🤖 Auto-Capture: {'ENABLED' if enabled else 'DISABLED'} (Press 'A' to toggle)\n")
+            elif key in (ord('f'), ord('F')):
+                is_fullscreen = not is_fullscreen
+                if is_fullscreen:
+                    cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+                    print("\n  📺 Fullscreen: ON (Press 'F' to toggle)\n")
+                else:
+                    cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
+                    if os.name == 'nt':
+                        try:
+                            import ctypes
+                            hwnd = ctypes.windll.user32.FindWindowW(None, WINDOW_NAME)
+                            if hwnd:
+                                ctypes.windll.user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
+                        except Exception:
+                            pass
+                    print("\n  🪟 Fullscreen: OFF (Maximized window)\n")
             elif key in (ord('w'), ord('W')):
                 show_warp = not show_warp
                 if not show_warp: cv2.destroyWindow("Warped Booklet")
