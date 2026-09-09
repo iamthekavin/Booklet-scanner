@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 import numpy as np
 
-from models import DetectionResult, ReviewFlag
+from models import DetectionResult, DetectionMethod, ReviewFlag
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,8 @@ class AutoCaptureConfig:
     cooldown_duration: float = 1.8      # Post-capture pause before looking for page turn (s)
     page_turn_drift_px: float = 35.0    # Corner displacement threshold indicating page has turned (px)
     require_no_hands: bool = True       # Require hands to be absent before triggering
+    require_refined_corners: bool = True # Require CV-refined quad (rejects coarse YOLO_DIRECT fallback)
+    post_hand_settle_s: float = 0.6     # Settling pause after hand is removed before countdown (s)
 
 
 class AutoCaptureController:
@@ -53,10 +55,12 @@ class AutoCaptureController:
 
         self.stable_timer: float = 0.0
         self.cooldown_timer: float = 0.0
+        self.hand_settle_timer: float = 0.0
         self.last_corners: Optional[np.ndarray] = None
         self.captured_corners: Optional[np.ndarray] = None
         self.page_turn_detected: bool = False
         self.last_status: str = "Ready"
+
 
     def toggle(self) -> bool:
         """Toggle auto-capture ON/OFF."""
@@ -193,8 +197,22 @@ class AutoCaptureController:
             has_hands = bool(result.hands_detected) or (ReviewFlag.HAND_OCCLUSION in result.review_flags)
             if has_hands:
                 self.stable_timer = 0.0
+                self.hand_settle_timer = self.config.post_hand_settle_s
                 self.state = AutoCaptureState.IDLE
                 return False, self.state, 0.0, "Hand detected - remove hand"
+
+        if self.hand_settle_timer > 0.0:
+            self.hand_settle_timer = max(0.0, self.hand_settle_timer - dt)
+            self.stable_timer = 0.0
+            self.state = AutoCaptureState.IDLE
+            return False, self.state, 0.0, "Hand removed - settling..."
+
+        if self.config.require_refined_corners:
+            if result.detection_method != DetectionMethod.YOLO_CV_REFINED:
+                self.stable_timer = 0.0
+                self.state = AutoCaptureState.IDLE
+                return False, self.state, 0.0, "Aligning booklet edges..."
+
 
         # ── Stability Tracking ───────────────────────────────────────
         curr_corners = result.corners.points.astype(np.float32)

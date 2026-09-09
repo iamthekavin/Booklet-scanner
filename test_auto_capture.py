@@ -230,3 +230,43 @@ class TestAutoCaptureController:
         assert state == AutoCaptureState.WAITING_FOR_PAGE_TURN
         assert controller.page_turn_detected is False
 
+    def test_unrefined_edge_does_not_trigger(self, controller, base_corners):
+        """Coarse YOLO_DIRECT detections must not fire auto-capture; must wait for refined edge."""
+        res = make_result(base_corners)
+        res.detection_method = DetectionMethod.YOLO_DIRECT
+
+        for _ in range(5):
+            captured, state, prog, msg = controller.update(res, q_pass=True, dt=0.2)
+            assert captured is False
+            assert "Aligning booklet edges" in msg
+            assert controller.stable_timer == 0.0
+
+    def test_post_hand_settle_delay(self, controller, base_corners):
+        """After hands leave the booklet, a settle timer must elapse before countdown begins."""
+        res_hands = make_result(base_corners, hands=True)
+        res_clean = make_result(base_corners, hands=False)
+
+        # Hand in frame
+        controller.update(res_hands, q_pass=True, dt=0.1)
+        assert controller.hand_settle_timer > 0.0
+
+        # Hand removed: 1st frame during settle window (0.2s of 0.6s)
+        captured, state, prog, msg = controller.update(res_clean, q_pass=True, dt=0.2)
+        assert captured is False
+        assert "settling" in msg.lower()
+        assert controller.stable_timer == 0.0
+
+        # Settle window finishes (advance 0.5s > 0.4s remaining)
+        controller.update(res_clean, q_pass=True, dt=0.5)
+
+        # Now stabilization starts (frame 1 registers initial corners)
+        captured, state, prog, msg = controller.update(res_clean, q_pass=True, dt=0.1)
+        assert state == AutoCaptureState.STABILIZING
+
+        # Frame 2 accumulates stability timer
+        captured, state, prog, msg = controller.update(res_clean, q_pass=True, dt=0.2)
+        assert state == AutoCaptureState.STABILIZING
+        assert controller.stable_timer > 0.0
+
+
+

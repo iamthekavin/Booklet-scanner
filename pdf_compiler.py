@@ -12,17 +12,48 @@ Handles the compilation of final PDFs from captured booklet spreads:
 
 import logging
 import os
+import time
+from collections import deque
 from pathlib import Path
+
 from typing import List, Optional, Tuple, Union
 
 import cv2
+import imagehash
 import img2pdf
 import numpy as np
 import pikepdf
+from PIL import Image
 
 from perspective import PerspectiveWarper
 
 logger = logging.getLogger(__name__)
+
+DUP_HASH_DIST = 6
+
+
+def compute_image_phash(image: np.ndarray) -> imagehash.ImageHash:
+    """Compute perceptual hash (pHash) of an image array."""
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image
+    return imagehash.phash(Image.fromarray(gray))
+
+
+def is_duplicate_hash(
+    new_hashes: List[imagehash.ImageHash],
+    prev_hashes: List[imagehash.ImageHash],
+    max_dist: int = DUP_HASH_DIST,
+) -> bool:
+    """Check if all new page hashes match previously seen page hashes within max_dist."""
+    if not prev_hashes or not new_hashes:
+        return False
+    for nh in new_hashes:
+        if not any(abs(nh - ph) <= max_dist for ph in prev_hashes):
+            return False
+    return True
+
 
 
 def split_spread_to_pages(
@@ -291,6 +322,9 @@ class BookletCaptureSession:
         session_dir: Union[str, Path],
         warper: Optional[PerspectiveWarper] = None,
         enhance: bool = True,
+        frames_per_booklet: Optional[int] = None,
+        booklet_idx: int = 1,
+        dup_hash_dist: int = DUP_HASH_DIST,
     ) -> None:
         self.session_dir = Path(session_dir)
         self.pages_dir = self.session_dir / "pages"
@@ -300,35 +334,66 @@ class BookletCaptureSession:
 
         self.warper = warper or PerspectiveWarper()
         self.enhance = enhance
+        self.frames_per_booklet = frames_per_booklet
+        self.booklet_idx = booklet_idx
+        self.dup_hash_dist = dup_hash_dist
 
         self.spread_count: int = 0
         self.page_image_paths: List[Path] = []
         self.spread_paths: List[Path] = []
+        self.recent_hashes: deque = deque(maxlen=6)
 
     @property
     def page_count(self) -> int:
         """Total number of individual pages in the session (always 2x spread_count)."""
         return len(self.page_image_paths)
 
+    def is_booklet_complete(self) -> bool:
+        """Returns True if the current booklet has reached its target frame count."""
+        return bool(self.frames_per_booklet and self.spread_count >= self.frames_per_booklet)
+
     def add_spread(
         self,
         warped_spread: np.ndarray,
         raw_frame: Optional[np.ndarray] = None,
-    ) -> Tuple[Path, Path]:
+        check_duplicate: bool = True,
+    ) -> List[Path]:
         """Add a captured booklet spread to the session (FR-4.2).
 
         Splits the spread into left and right individual page images, saves them
         consecutively as e.g. 001.jpg, 002.jpg, and records them for PDF compilation.
+        Rejects duplicate spreads via perceptual hash comparison.
 
         Args:
             warped_spread: Warped 2-page spread image.
             raw_frame: Optional raw camera frame for archival.
+            check_duplicate: Whether to check and reject duplicate spreads via pHash.
 
         Returns:
-            Tuple of (left_page_path, right_page_path) in reading order.
+            List of saved page image paths, or empty list if rejected as duplicate.
         """
+        h, w = warped_spread.shape[:2]
+
+        # Duplicate spread guard via perceptual hash
+        if w / h < 1.15:
+            cand_hashes = [compute_image_phash(warped_spread)]
+        else:
+            mid = w // 2
+            cand_hashes = [
+                compute_image_phash(warped_spread[:, :mid]),
+                compute_image_phash(warped_spread[:, mid:]),
+            ]
+
+        if check_duplicate and is_duplicate_hash(cand_hashes, list(self.recent_hashes), max_dist=self.dup_hash_dist):
+            logger.warning(
+                f"Duplicate capture rejected by perceptual hash (Hamming dist <= {self.dup_hash_dist})"
+            )
+            return []
+
+        self.recent_hashes.extend(cand_hashes)
         self.spread_count += 1
         spread_idx = self.spread_count
+
 
         # Archive the spread image
         spread_path = self.spreads_dir / f"spread_{spread_idx:03d}.jpg"
@@ -405,3 +470,38 @@ class BookletCaptureSession:
             logger.warning(f"PDF verification warning: {validation['errors']}")
 
         return target_pdf
+
+    def roll_over_to_next_booklet(self) -> Path:
+        """Finalize current booklet PDF and roll over session to the next booklet.
+
+        Resets page and spread counters and clears perceptual hash history
+        so the next booklet starts clean.
+
+        Returns:
+            New session directory path for the next booklet.
+        """
+        if self.page_image_paths:
+            try:
+                self.compile_pdf()
+            except Exception as e:
+                logger.error(f"Error finalizing PDF during booklet roll-over: {e}")
+
+        self.booklet_idx += 1
+        base_dir = self.session_dir.parent
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        new_dir = base_dir / f"session_{ts}_b{self.booklet_idx:02d}"
+
+        self.session_dir = new_dir
+        self.pages_dir = self.session_dir / "pages"
+        self.spreads_dir = self.session_dir / "spreads"
+        self.pages_dir.mkdir(parents=True, exist_ok=True)
+        self.spreads_dir.mkdir(parents=True, exist_ok=True)
+
+        self.spread_count = 0
+        self.page_image_paths = []
+        self.spread_paths = []
+        self.recent_hashes.clear()
+
+        logger.info(f"Rolled over to new booklet #{self.booklet_idx:02d}: {self.session_dir}")
+        return self.session_dir
+

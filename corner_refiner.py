@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 # Constants
 MIN_AREA_RATIO = 0.05
-MAX_AREA_RATIO = 0.95
+MAX_AREA_RATIO = 0.99
 MIN_ANGLE_DEG = 30.0
 MAX_ASPECT_RATIO = 3.0
 MIN_ROI_COVERAGE = 0.40  # candidate quad must cover >=40% of the cropped ROI
@@ -265,6 +265,10 @@ class CornerRefiner:
     ) -> Optional[np.ndarray]:
         """Find corners using largest contour (paper color segmentation + Otsu, adaptive as fallback)."""
         try:
+            # If the ROI is flat/featureless (e.g. uniform color or gray), no contour strategy can be trusted
+            if float(np.std(roi_gray)) < 5.0 or int(np.ptp(roi_gray)) < 15:
+                return None
+
             blurred = cv2.GaussianBlur(roi_gray, (5, 5), 0)
 
             # Strategy 1: Paper color segmentation + Otsu binarization + morphological close
@@ -285,8 +289,21 @@ class CornerRefiner:
 
             contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             if contours:
-                c = max(contours, key=cv2.contourArea)
-                hull = cv2.convexHull(c)
+                contours = sorted(contours, key=cv2.contourArea, reverse=True)
+                roi_area = float(roi_gray.shape[0] * roi_gray.shape[1])
+                c_top = contours[0]
+
+                # Two-page spread fusion: spine valley often divides paper into 2 large page contours
+                if (
+                    len(contours) >= 2
+                    and cv2.contourArea(contours[1]) > 0.20 * roi_area
+                    and cv2.contourArea(c_top) < 0.70 * roi_area
+                ):
+                    combined_pts = np.vstack([contours[0], contours[1]])
+                    hull = cv2.convexHull(combined_pts)
+                else:
+                    hull = cv2.convexHull(c_top)
+
                 peri = cv2.arcLength(hull, True)
                 # Multi-epsilon search: textured/patterned backgrounds or paper wrinkles
                 # may produce extra vertices at a single fixed epsilon
@@ -310,8 +327,19 @@ class CornerRefiner:
 
             contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             if contours:
-                largest_contour = max(contours, key=cv2.contourArea)
-                hull = cv2.convexHull(largest_contour)
+                contours = sorted(contours, key=cv2.contourArea, reverse=True)
+                roi_area = float(roi_gray.shape[0] * roi_gray.shape[1])
+                c_top = contours[0]
+                if (
+                    len(contours) >= 2
+                    and cv2.contourArea(contours[1]) > 0.20 * roi_area
+                    and cv2.contourArea(c_top) < 0.70 * roi_area
+                ):
+                    combined_pts = np.vstack([contours[0], contours[1]])
+                    hull = cv2.convexHull(combined_pts)
+                else:
+                    hull = cv2.convexHull(c_top)
+
                 peri = cv2.arcLength(hull, True)
                 for eps in (0.015, 0.02, 0.025, 0.03, 0.035, 0.04):
                     approx = cv2.approxPolyDP(hull, eps * peri, True)
@@ -378,13 +406,18 @@ class CornerRefiner:
         return rect
 
     @staticmethod
-    def validate_quad(corners: np.ndarray, frame_shape: Tuple[int, int]) -> bool:
+    def validate_quad(
+        corners: np.ndarray,
+        frame_shape: Tuple[int, int],
+        is_roi: bool = False,
+    ) -> bool:
         """
         Validate if the 4 points form a valid quadrilateral representing a booklet.
 
         Args:
             corners: Array of 4 points.
             frame_shape: (height, width) of the frame or ROI.
+            is_roi: If True, relaxed upper area bound allows booklet to fill up to 105% of ROI.
 
         Returns:
             True if valid, False otherwise.
@@ -403,7 +436,9 @@ class CornerRefiner:
         # Calculate area
         pts = corners.astype(np.float32)
         area = cv2.contourArea(pts)
-        if area < MIN_AREA_RATIO * frame_area or area > MAX_AREA_RATIO * frame_area:
+        min_ratio = 0.20 if is_roi else MIN_AREA_RATIO
+        max_ratio = 1.05 if is_roi else MAX_AREA_RATIO
+        if area < min_ratio * frame_area or area > max_ratio * frame_area:
             return False
 
         # Check convexity
@@ -456,8 +491,8 @@ class CornerRefiner:
         Args:
             corners: 4x2 array of candidate corners.
             roi_shape: (height, width) of the cropped ROI.
-            min_coverage: Minimum ratio of quad area to ROI area (default 0.55).
-            min_span: Minimum ratio of quad width/height span to ROI dimensions (default 0.70).
+            min_coverage: Minimum ratio of quad area to ROI area (default 0.40).
+            min_span: Minimum ratio of quad width/height span to ROI dimensions (default 0.55).
 
         Returns:
             True if quad spans the full booklet ROI, False otherwise.
@@ -465,7 +500,7 @@ class CornerRefiner:
         if corners is None or len(corners) != 4:
             return False
 
-        if not cls.validate_quad(corners, roi_shape):
+        if not cls.validate_quad(corners, roi_shape, is_roi=True):
             return False
 
         h, w = roi_shape[:2]

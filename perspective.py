@@ -58,8 +58,13 @@ class PerspectiveWarper:
             ], dtype=np.float32)
 
             matrix = cv2.getPerspectiveTransform(corners.astype(np.float32), dst_pts)
-            warped = cv2.warpPerspective(frame, matrix, (target_w, target_h))
+            warped = cv2.warpPerspective(
+                frame, matrix, (target_w, target_h),
+                flags=cv2.INTER_LANCZOS4,
+                borderMode=cv2.BORDER_REPLICATE
+            )
             return warped
+
         except Exception as e:
             logger.error(f"Failed to adaptive warp image: {e}")
             return None
@@ -194,12 +199,72 @@ class PerspectiveWarper:
             blur = cv2.GaussianBlur(out_bgr, (0, 0), 1.0)
             crisp = cv2.addWeighted(out_bgr, 1.25, blur, -0.25, 0)
 
-            return crisp
+            # 5. Deskew horizontal ruled lines / handwriting
+            straight = deskew_page(crisp)
+            return straight
         except Exception as e:
             logger.error(f"Failed to enhance scan with Light Text filter: {e}")
             return page_image
 
+
+def deskew_page(image: np.ndarray, max_angle: float = 12.0) -> np.ndarray:
+    """Deskew a warped page image by detecting horizontal ruled lines/text baselines.
+
+    Uses Canny edge detection and probabilistic Hough lines constrained within
+    [-max_angle, +max_angle] degrees. Computes median orientation and rotates
+    the page to align lines strictly horizontal with pure white borders.
+    """
+    if image is None or image.size == 0:
+        return image
+
+    try:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+        edges = cv2.Canny(gray, 50, 150)
+        min_line_len = max(40, gray.shape[1] // 5)
+        lines = cv2.HoughLinesP(
+            edges, 1, np.pi / 720, threshold=100,
+            minLineLength=min_line_len, maxLineGap=20
+        )
+        if lines is None:
+            return image
+
+        angles = []
+        for x1, y1, x2, y2 in lines.reshape(-1, 4):
+            dx = float(x2 - x1)
+            dy = float(y2 - y1)
+            if dx == 0:
+                continue
+            ang = math.degrees(math.atan2(dy, dx))
+            if -max_angle <= ang <= max_angle:
+                angles.append(ang)
+
+
+        if not angles or len(angles) < 3:
+            return image
+
+        median_ang = float(np.median(angles))
+        if abs(median_ang) < 0.25:  # Already level (< 0.25 deg)
+            return image
+
+        h, w = image.shape[:2]
+        center = (w / 2.0, h / 2.0)
+        M = cv2.getRotationMatrix2D(center, median_ang, 1.0)
+        border_val = (255, 255, 255) if len(image.shape) == 3 else 255
+        deskewed = cv2.warpAffine(
+            image, M, (w, h),
+            flags=cv2.INTER_CUBIC,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=border_val,
+        )
+        logger.info(f"Deskewed page by {median_ang:.2f} degrees")
+        return deskewed
+    except Exception as e:
+        logger.error(f"Failed to deskew page: {e}")
+        return image
+
+
 def four_point_transform(image: np.ndarray, pts: np.ndarray) -> np.ndarray:
+
     """
     Classic 4-point perspective transform function.
 

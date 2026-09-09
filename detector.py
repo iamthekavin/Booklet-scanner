@@ -19,7 +19,7 @@ Usage:
 import logging
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
@@ -36,6 +36,70 @@ from models import (
 from perspective import PerspectiveWarper
 
 logger = logging.getLogger(__name__)
+
+def detect_hand_skin_on_quad(
+    frame: np.ndarray, quad_pts: Optional[np.ndarray]
+) -> Tuple[bool, float, list[BoundingBox]]:
+    """Detect presence of human hand/skin over the booklet surface.
+
+    Uses dual-color space (YCrCb + HSV) skin segmentation with morphological
+    filtering. Checks if fingers or a hand patch overlap the booklet quad.
+    """
+    if quad_pts is None or len(quad_pts) < 4:
+        return False, 0.0, []
+
+    h, w = frame.shape[:2]
+    mask = np.zeros((h, w), dtype=np.uint8)
+    pts = quad_pts.astype(np.int32)
+    cv2.fillPoly(mask, [pts], 255)
+
+    pad = max(6, int(min(h, w) * 0.02))
+    kernel_erode = cv2.getStructuringElement(cv2.MORPH_RECT, (pad * 2 + 1, pad * 2 + 1))
+    mask_inner = cv2.erode(mask, kernel_erode)
+
+    booklet_area = np.sum(mask_inner > 0)
+    if booklet_area < 500:
+        return False, 0.0, []
+
+    ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
+    skin_ycrcb = cv2.inRange(ycrcb, np.array([0, 133, 77]), np.array([255, 173, 127]))
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    skin_hsv = cv2.inRange(hsv, np.array([0, 30, 60]), np.array([25, 200, 255]))
+
+    skin = cv2.bitwise_and(skin_ycrcb, skin_hsv)
+    skin_on_booklet = cv2.bitwise_and(skin, mask_inner)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    clean_skin = cv2.morphologyEx(skin_on_booklet, cv2.MORPH_OPEN, kernel)
+    clean_skin = cv2.morphologyEx(clean_skin, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(clean_skin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    hand_boxes: list[BoundingBox] = []
+    valid_skin_px = 0
+
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area >= 1900:
+            x, y, bw, bh = cv2.boundingRect(c)
+            # A real finger or hand has thickness (min dimension >= 22 px)
+            if min(bw, bh) >= 22 and max(bw, bh) / max(1, min(bw, bh)) < 7.0:
+                hand_boxes.append(
+                    BoundingBox(
+                        x1=float(x),
+                        y1=float(y),
+                        x2=float(x + bw),
+                        y2=float(y + bh),
+                        confidence=0.9,
+                        class_id=1,
+                        class_name="hand",
+                    )
+                )
+                valid_skin_px += int(area)
+
+    ratio = valid_skin_px / float(booklet_area)
+    has_hand = len(hand_boxes) > 0 or ratio >= 0.015
+    return has_hand, ratio, hand_boxes
+
 
 
 class BookletDetector:
@@ -140,10 +204,12 @@ class BookletDetector:
         if len(booklet_detections) > 1:
             review_flags.append(ReviewFlag.MULTIPLE_BOOKLETS)
 
-        # ── Step 3: Hand occlusion check ──────────────────────────────
+        # ── Step 3: Hand occlusion check (YOLO class) ─────────────────
         if hands:
             review_flags.append(ReviewFlag.HAND_OCCLUSION)
             logger.info(f"Hand(s) detected ({len(hands)}). Will mask during refinement.")
+
+
 
         # ── Step 4: Confidence-gated corner refinement ────────────────
         def _covers_bbox(corners_pts: np.ndarray, bbox: BoundingBox) -> bool:
@@ -181,8 +247,20 @@ class BookletDetector:
             corners = self._bbox_to_corners(best)
             method = DetectionMethod.YOLO_DIRECT
 
+        # ── Step 4b: CV Skin / Hand occlusion check on candidate booklet ─
+        check_pts = corners if corners is not None else self._bbox_to_corners(best)
+        has_skin, skin_ratio, skin_boxes = detect_hand_skin_on_quad(frame, check_pts)
+        if has_skin:
+            hands.extend(skin_boxes)
+            if ReviewFlag.HAND_OCCLUSION not in review_flags:
+                review_flags.append(ReviewFlag.HAND_OCCLUSION)
+            logger.info(
+                f"Hand/skin detected on booklet ({skin_ratio*100:.1f}% surface, {len(skin_boxes)} patches)."
+            )
+
         if best.confidence < self.config.medium_confidence:
             review_flags.append(ReviewFlag.LOW_CONFIDENCE)
+
 
         # ── Step 5: Geometric validation ──────────────────────────────
         if corners is not None:

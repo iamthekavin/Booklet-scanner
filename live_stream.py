@@ -308,6 +308,9 @@ def draw_auto_capture_hud(
     status_msg: str,
     flash_active: bool,
     page_count: int,
+    booklet_idx: int = 1,
+    frames_per_booklet: Optional[int] = None,
+    spread_count: int = 0,
 ) -> np.ndarray:
     """Draws auto-capture progress bar, status, and capture flash HUD."""
     h, w = vis_360.shape[:2]
@@ -315,15 +318,23 @@ def draw_auto_capture_hud(
     # Flash banner on capture
     if flash_active:
         cv2.rectangle(vis_360, (0, 0), (w - 1, h - 1), GREEN, 6)
-        banner_w, banner_h = 360, 42
+        banner_w, banner_h = 380, 42
         bx1 = (w - banner_w) // 2
         by1 = 40
         cv2.rectangle(vis_360, (bx1, by1), (bx1 + banner_w, by1 + banner_h), (0, 140, 0), -1)
         cv2.rectangle(vis_360, (bx1, by1), (bx1 + banner_w, by1 + banner_h), WHITE, 2)
-        text = f"CAPTURED! PAGE #{page_count}"
-        tsize = cv2.getTextSize(text, FONT, 0.7, 2)[0]
-        cv2.putText(vis_360, text, (bx1 + (banner_w - tsize[0]) // 2, by1 + 28), FONT, 0.7, WHITE, 2)
+        if frames_per_booklet:
+            text = f"CAPTURED! B#{booklet_idx:02d} F{spread_count}/{frames_per_booklet} (P#{page_count})"
+        else:
+            text = f"CAPTURED! PAGE #{page_count}"
+        tsize = cv2.getTextSize(text, FONT, 0.65, 2)[0]
+        cv2.putText(vis_360, text, (bx1 + (banner_w - tsize[0]) // 2, by1 + 28), FONT, 0.65, WHITE, 2)
         return vis_360
+
+    if frames_per_booklet is not None:
+        b_tag = f"Booklet #{booklet_idx:02d} | Spread {spread_count}/{frames_per_booklet}"
+        tsize = cv2.getTextSize(b_tag, FONT_SMALL, 1.0, 1)[0]
+        cv2.putText(vis_360, b_tag, (w - tsize[0] - 12, 25), FONT_SMALL, 1.0, CYAN, 1)
 
     if state == AutoCaptureState.STABILIZING:
         bar_x = 140
@@ -391,12 +402,16 @@ def execute_capture(
         raw_to_save = frame
 
     saved_pages = session.add_spread(warped_to_save, raw_frame=raw_to_save)
+    tag = "🤖 Auto-Capture" if is_auto else "📸 Manual Capture"
+    if not saved_pages:
+        print(f"\n  ⚠️ {tag} skipped: duplicate spread detected (pHash distance <= {session.dup_hash_dist})!")
+        return False
+
     pdf_path = session.compile_pdf()
 
     auto_controller.notify_manual_capture(result.corners.as_float32())
     threading.Thread(target=play_shutter_sound, daemon=True).start()
 
-    tag = "🤖 Auto-Capture" if is_auto else "📸 Manual Capture"
     if len(saved_pages) == 2:
         print(f"\n  {tag}: Spread #{session.spread_count} captured & split into 2 pages (FR-4.2):")
         print(f"     ├── Left page:  {saved_pages[0].name}")
@@ -405,7 +420,18 @@ def execute_capture(
         print(f"\n  {tag}: Cover / Single page #{session.spread_count} captured:")
         print(f"     └── Saved:      {saved_pages[0].name}")
     print(f"  📄 PDF compiled: {pdf_path.name} (Total pages: {session.page_count})\n")
+
+    if session.is_booklet_complete():
+        print("\n" + "=" * 62)
+        print(f"  🎉 BOOKLET #{session.booklet_idx:02d} COMPLETED! ({session.page_count} pages)")
+        print(f"  📁 PDF finalized: {pdf_path}")
+        print("=" * 62)
+        session.roll_over_to_next_booklet()
+        auto_controller.reset()
+        print(f"  ✨ Ready for Booklet #{session.booklet_idx:02d} — place cover page to begin.\n")
+
     return True
+
 
 
 def save_frame(frame, annotated, warped, output_dir, prefix="snap"):
@@ -440,6 +466,8 @@ def main() -> None:
     parser.add_argument("--auto", dest="auto_capture", action="store_true", default=True, help="Enable auto-capture (default: True)")
     parser.add_argument("--no-auto", dest="auto_capture", action="store_false", help="Disable auto-capture")
     parser.add_argument("--auto-delay", type=float, default=1.0, help="Hold duration in seconds for auto-capture (default: 1.0s)")
+    parser.add_argument("--booklet-frames", type=int, default=None, help="Spreads per booklet for auto-roll (e.g. 8 for an 8-spread / 16-page booklet)")
+    parser.add_argument("--dup-hash-dist", type=int, default=6, help="pHash Hamming distance threshold to reject duplicates (default: 6)")
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parent
@@ -471,7 +499,12 @@ def main() -> None:
     flash_timer = 0.0
 
     session_dir = output_dir / f"session_{time.strftime('%Y%m%d_%H%M%S')}"
-    session = BookletCaptureSession(session_dir=session_dir, warper=warper)
+    session = BookletCaptureSession(
+        session_dir=session_dir,
+        warper=warper,
+        frames_per_booklet=args.booklet_frames,
+        dup_hash_dist=args.dup_hash_dist,
+    )
 
     if os.name == 'nt':
         try:
@@ -574,6 +607,9 @@ def main() -> None:
                 auto_msg,
                 flash_active=(flash_timer > 0),
                 page_count=session.page_count,
+                booklet_idx=session.booklet_idx,
+                frames_per_booklet=session.frames_per_booklet,
+                spread_count=session.spread_count,
             )
             if 'elapsed' in locals() and elapsed > 0:
                 flash_timer = max(0.0, flash_timer - elapsed)

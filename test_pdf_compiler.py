@@ -224,7 +224,7 @@ class TestPdfCompilationFR42:
 
         # Capture Spread 1
         s1 = create_synthetic_spread(left_label="S1-L", right_label="S1-R")
-        p1, p2 = session.add_spread(s1)
+        p1, p2 = session.add_spread(s1, check_duplicate=False)
         assert p1.name == "001.jpg"
         assert p2.name == "002.jpg"
         assert session.spread_count == 1
@@ -232,7 +232,7 @@ class TestPdfCompilationFR42:
 
         # Capture Spread 2
         s2 = create_synthetic_spread(left_label="S2-L", right_label="S2-R")
-        p3, p4 = session.add_spread(s2)
+        p3, p4 = session.add_spread(s2, check_duplicate=False)
         assert p3.name == "003.jpg"
         assert p4.name == "004.jpg"
         assert session.spread_count == 2
@@ -240,7 +240,7 @@ class TestPdfCompilationFR42:
 
         # Capture Spread 3
         s3 = create_synthetic_spread(left_label="S3-L", right_label="S3-R")
-        p5, p6 = session.add_spread(s3)
+        p5, p6 = session.add_spread(s3, check_duplicate=False)
         assert p5.name == "005.jpg"
         assert p6.name == "006.jpg"
         assert session.spread_count == 3
@@ -254,6 +254,22 @@ class TestPdfCompilationFR42:
         assert validation["valid"]
         assert validation["page_count"] == 6
         assert validation["is_single_page_sizing"]
+
+    def test_duplicate_spread_rejected_by_phash(self, tmp_path):
+        """Verify that identical or near-duplicate spreads are rejected by pHash guard."""
+        session = BookletCaptureSession(session_dir=tmp_path / "dup_session", enhance=False)
+
+        s1 = create_synthetic_spread(left_label="ORIGINAL", right_label="PAGE 1")
+        saved = session.add_spread(s1, check_duplicate=True)
+        assert len(saved) == 2
+        assert session.spread_count == 1
+
+        # Attempt to capture the exact same spread again
+        saved_dup = session.add_spread(s1, check_duplicate=True)
+        assert saved_dup == []  # Rejected!
+        assert session.spread_count == 1
+        assert session.page_count == 2
+
 
     def test_single_page_cover_does_not_split(self, tmp_path):
         """A single portrait page (e.g. front cover) must be saved as 1 page, NOT cut in half."""
