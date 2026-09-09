@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from collections import deque
 import threading
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
@@ -23,6 +24,7 @@ from corner_refiner import CornerRefiner
 from models import DetectionMethod, DetectionResult, ReviewFlag
 from perspective import PerspectiveWarper
 from pdf_compiler import BookletCaptureSession, split_spread_to_pages, save_split_pages, compile_pages_to_pdf
+from auto_capture import AutoCaptureController, AutoCaptureConfig, AutoCaptureState
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("live_detect")
@@ -135,7 +137,14 @@ def draw_cv_geometry(vis: np.ndarray, corners: np.ndarray | None) -> np.ndarray:
             cv2.circle(vis, p1, 7, RED, -1, cv2.LINE_AA)
     return vis
 
-def build_yolo_panel(vis_360: np.ndarray, result: DetectionResult, fps: float, frame_count: int, conf_thresh: float) -> np.ndarray:
+def build_yolo_panel(
+    vis_360: np.ndarray,
+    result: DetectionResult,
+    fps: float,
+    frame_count: int,
+    conf_thresh: float,
+    auto_enabled: bool = True,
+) -> np.ndarray:
     """Builds the 640x492 panel by vertically stacking the 40px top bar, 360px video, and 92px bottom bar."""
     # Central warning on video
     if ReviewFlag.NO_DETECTION in result.review_flags:
@@ -146,6 +155,12 @@ def build_yolo_panel(vis_360: np.ndarray, result: DetectionResult, fps: float, f
     # Top Bar (640 x 40)
     top_bar = np.full((40, 640, 3), DARK_BG, dtype=np.uint8)
     cv2.putText(top_bar, "YOLO11 Detection (NEW)", (10, 26), FONT, 0.7, GREEN, 2)
+    
+    # Auto-Capture toggle indicator
+    auto_label = "[A] Auto: ON" if auto_enabled else "[A] Auto: OFF"
+    auto_col = GREEN if auto_enabled else (120, 120, 120)
+    cv2.putText(top_bar, auto_label, (290, 26), FONT_SMALL, 1.1, auto_col, 1)
+
     cv2.putText(top_bar, f"FPS: {fps:.1f} | Frame: {frame_count}", (450, 16), FONT_SMALL, 0.9, YELLOW, 1)
     cv2.putText(top_bar, f"Conf >= {conf_thresh:.2f}", (450, 32), FONT_SMALL, 0.9, WHITE, 1)
     
@@ -276,6 +291,123 @@ def open_stream(args: argparse.Namespace) -> ThreadedCamera:
     logger.info("Stream opened successfully")
     return cap
 
+def play_shutter_sound() -> None:
+    """Plays a non-blocking camera shutter beep on Windows."""
+    try:
+        import winsound
+        winsound.Beep(1400, 90)
+        winsound.Beep(1800, 70)
+    except Exception:
+        pass
+
+
+def draw_auto_capture_hud(
+    vis_360: np.ndarray,
+    state: AutoCaptureState,
+    progress: float,
+    status_msg: str,
+    flash_active: bool,
+    page_count: int,
+) -> np.ndarray:
+    """Draws auto-capture progress bar, status, and capture flash HUD."""
+    h, w = vis_360.shape[:2]
+
+    # Flash banner on capture
+    if flash_active:
+        cv2.rectangle(vis_360, (0, 0), (w - 1, h - 1), GREEN, 6)
+        banner_w, banner_h = 360, 42
+        bx1 = (w - banner_w) // 2
+        by1 = 40
+        cv2.rectangle(vis_360, (bx1, by1), (bx1 + banner_w, by1 + banner_h), (0, 140, 0), -1)
+        cv2.rectangle(vis_360, (bx1, by1), (bx1 + banner_w, by1 + banner_h), WHITE, 2)
+        text = f"CAPTURED! PAGE #{page_count}"
+        tsize = cv2.getTextSize(text, FONT, 0.7, 2)[0]
+        cv2.putText(vis_360, text, (bx1 + (banner_w - tsize[0]) // 2, by1 + 28), FONT, 0.7, WHITE, 2)
+        return vis_360
+
+    if state == AutoCaptureState.STABILIZING:
+        bar_x = 140
+        bar_y = h - 35
+        bar_w = 360
+        bar_h = 24
+        cv2.rectangle(vis_360, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), DARK_BG, -1)
+        fill_w = int(max(0.0, min(1.0, progress)) * (bar_w - 4))
+        fill_color = GREEN if progress >= 0.8 else CYAN
+        if fill_w > 0:
+            cv2.rectangle(vis_360, (bar_x + 2, bar_y + 2), (bar_x + 2 + fill_w, bar_y + bar_h - 2), fill_color, -1)
+        cv2.rectangle(vis_360, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), WHITE, 1)
+        pct = int(progress * 100)
+        label = f"Auto-Capture: {pct}%"
+        tsize = cv2.getTextSize(label, FONT_SMALL, 1.0, 1)[0]
+        cv2.putText(vis_360, label, (bar_x + (bar_w - tsize[0]) // 2, bar_y + 16), FONT_SMALL, 1.0, WHITE, 1)
+
+    elif state == AutoCaptureState.WAITING_FOR_PAGE_TURN:
+        bar_x = 160
+        bar_y = h - 35
+        bar_w = 320
+        bar_h = 24
+        cv2.rectangle(vis_360, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (40, 40, 80), -1)
+        cv2.rectangle(vis_360, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), YELLOW, 1)
+        label = "Turn to next page..."
+        tsize = cv2.getTextSize(label, FONT_SMALL, 1.0, 1)[0]
+        cv2.putText(vis_360, label, (bar_x + (bar_w - tsize[0]) // 2, bar_y + 16), FONT_SMALL, 1.0, YELLOW, 1)
+
+    return vis_360
+
+
+def execute_capture(
+    frame: np.ndarray,
+    result: DetectionResult,
+    warped: Optional[np.ndarray],
+    args: argparse.Namespace,
+    detector: BookletDetector,
+    warper: PerspectiveWarper,
+    session: BookletCaptureSession,
+    auto_controller: AutoCaptureController,
+    is_auto: bool = False,
+) -> bool:
+    """Executes spread capture, high-res fallback, warp, PDF update, and shutter audio."""
+    if warped is None or result.corners is None:
+        return False
+
+    high_res_frame = capture_high_res_frame(args)
+    if high_res_frame is not None:
+        hr_result = detector.detect(high_res_frame)
+        if hr_result.corners is not None:
+            warped_to_save = warper.warp_adaptive(high_res_frame, hr_result.corners.as_float32())
+        else:
+            h_orig, w_orig = frame.shape[:2]
+            h_high, w_high = high_res_frame.shape[:2]
+            scale_x = w_high / w_orig
+            scale_y = h_high / h_orig
+            corners_scaled = result.corners.as_float32().copy()
+            corners_scaled[:, 0] *= scale_x
+            corners_scaled[:, 1] *= scale_y
+            warped_to_save = warper.warp_adaptive(high_res_frame, corners_scaled)
+        raw_to_save = high_res_frame
+        print(f"\n  ✨ High-res capture successful: {high_res_frame.shape[1]}x{high_res_frame.shape[0]}")
+    else:
+        warped_to_save = warped
+        raw_to_save = frame
+
+    saved_pages = session.add_spread(warped_to_save, raw_frame=raw_to_save)
+    pdf_path = session.compile_pdf()
+
+    auto_controller.notify_manual_capture(result.corners.as_float32())
+    threading.Thread(target=play_shutter_sound, daemon=True).start()
+
+    tag = "🤖 Auto-Capture" if is_auto else "📸 Manual Capture"
+    if len(saved_pages) == 2:
+        print(f"\n  {tag}: Spread #{session.spread_count} captured & split into 2 pages (FR-4.2):")
+        print(f"     ├── Left page:  {saved_pages[0].name}")
+        print(f"     └── Right page: {saved_pages[1].name}")
+    else:
+        print(f"\n  {tag}: Cover / Single page #{session.spread_count} captured:")
+        print(f"     └── Saved:      {saved_pages[0].name}")
+    print(f"  📄 PDF compiled: {pdf_path.name} (Total pages: {session.page_count})\n")
+    return True
+
+
 def save_frame(frame, annotated, warped, output_dir, prefix="snap"):
     output_dir.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y%m%d_%H%M%S")
@@ -305,6 +437,9 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--scale", type=float, default=1.5)
+    parser.add_argument("--auto", dest="auto_capture", action="store_true", default=True, help="Enable auto-capture (default: True)")
+    parser.add_argument("--no-auto", dest="auto_capture", action="store_false", help="Disable auto-capture")
+    parser.add_argument("--auto-delay", type=float, default=1.0, help="Hold duration in seconds for auto-capture (default: 1.0s)")
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parent
@@ -330,6 +465,11 @@ def main() -> None:
     prev_corners = None
     ema_alpha = 0.3  # Smoothing factor: lower = smoother, higher = more responsive
 
+    # Auto-Capture controller & visual flash
+    auto_config = AutoCaptureConfig(stability_duration=args.auto_delay)
+    auto_controller = AutoCaptureController(config=auto_config, enabled=args.auto_capture)
+    flash_timer = 0.0
+
     session_dir = output_dir / f"session_{time.strftime('%Y%m%d_%H%M%S')}"
     session = BookletCaptureSession(session_dir=session_dir, warper=warper)
 
@@ -344,11 +484,13 @@ def main() -> None:
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
     print("  Stream connected.")
     print("  Controls:")
-    print("    S : Capture spread -> split into 2 pages (001.jpg, 002.jpg) -> compile to PDF (FR-4.2)")
+    print("    A : Toggle Auto-Capture ON/OFF (hands-free scanning)")
+    print("    S : Manual capture spread -> split & compile to PDF (FR-4.2)")
     print("    W : Toggle warped booklet window")
     print("    C : Capture training frame")
     print("    +/- : Adjust confidence threshold")
     print("    Q : Quit\n")
+    print(f"  🤖 Auto-Capture is {'ON (hold steady 1.0s to capture)' if auto_controller.enabled else 'OFF'}\n")
 
     try:
         while True:
@@ -405,17 +547,44 @@ def main() -> None:
                 cv_corners, cv_pts, cv_ms = None, 0, 0.0
                 cv_vis = frame.copy()
 
+            # 2b. Auto-Capture evaluation
+            auto_state = AutoCaptureState.DISABLED
+            auto_prog = 0.0
+            auto_msg = "Auto: OFF [A]"
+            if auto_controller.enabled:
+                dt_step = elapsed if ('elapsed' in locals() and elapsed > 0) else 0.033
+                should_auto_capture, auto_state, auto_prog, auto_msg = auto_controller.update(
+                    result, q_pass=q_pass, dt=dt_step
+                )
+                if should_auto_capture and warped is not None and result.corners is not None:
+                    flash_timer = 1.0
+                    execute_capture(
+                        frame, result, warped, args, detector, warper, session, auto_controller, is_auto=True
+                    )
+
             # 3. Resize videos to proper 16:9 ratio (640x360) BEFORE adding headers/footers
             yp_360 = cv2.resize(yolo_vis, (640, 360))
             cp_360 = cv2.resize(cv_vis, (640, 360))
             
+            # Draw Auto-Capture HUD (progress bar / countdown / flash banner)
+            draw_auto_capture_hud(
+                yp_360,
+                auto_state,
+                auto_prog,
+                auto_msg,
+                flash_active=(flash_timer > 0),
+                page_count=session.page_count,
+            )
+            if 'elapsed' in locals() and elapsed > 0:
+                flash_timer = max(0.0, flash_timer - elapsed)
+
             # Add Quality Gate overlay to the YOLO panel
             q_color = GREEN if q_pass else RED
             cv2.putText(yp_360, f"Gate: {q_reason} | Sharp: {q_sharpness:.0f} | Glare: {q_glare:.1%}", (10, 25), FONT_SMALL, 1.2, q_color, 2)
 
             # 4. Build Panels (stacks 40px header + 360px video + 92px footer = 492px)
             fps = 1.0 / (sum(fps_history) / len(fps_history)) if fps_history else 0.0
-            yp = build_yolo_panel(yp_360, result, fps, frame_count, conf_thresh)
+            yp = build_yolo_panel(yp_360, result, fps, frame_count, conf_thresh, auto_enabled=auto_controller.enabled)
             cp = build_cv_panel(cp_360, cv_corners, cv_pts, cv_ms)
 
             # 5. Stack horizontally -> exact 1280x492 base layout
@@ -443,47 +612,18 @@ def main() -> None:
 
             key = cv2.waitKey(1) & 0xFF
             if key in (ord('q'), ord('Q'), 27): break
+            elif key in (ord('a'), ord('A')):
+                enabled = auto_controller.toggle()
+                print(f"\n  🤖 Auto-Capture: {'ENABLED' if enabled else 'DISABLED'} (Press 'A' to toggle)\n")
             elif key in (ord('w'), ord('W')):
                 show_warp = not show_warp
                 if not show_warp: cv2.destroyWindow("Warped Booklet")
             elif key in (ord('s'), ord('S')):
                 if warped is not None and result.corners is not None:
-                    # Attempt high-res capture
-                    high_res_frame = capture_high_res_frame(args)
-                    if high_res_frame is not None:
-                        # Re-run detection on the high-res frame to ensure perfect crop 
-                        # regardless of camera movement during the HTTP fetch or FOV differences.
-                        # This runs YOLO exactly the same way, just on the new image.
-                        hr_result = detector.detect(high_res_frame)
-                        if hr_result.corners is not None:
-                            warped_to_save = warper.warp_adaptive(high_res_frame, hr_result.corners.as_float32())
-                        else:
-                            # Fallback to scaling preview corners if detection fails
-                            h_orig, w_orig = frame.shape[:2]
-                            h_high, w_high = high_res_frame.shape[:2]
-                            scale_x = w_high / w_orig
-                            scale_y = h_high / h_orig
-                            corners_scaled = result.corners.as_float32().copy()
-                            corners_scaled[:, 0] *= scale_x
-                            corners_scaled[:, 1] *= scale_y
-                            warped_to_save = warper.warp_adaptive(high_res_frame, corners_scaled)
-                            
-                        raw_to_save = high_res_frame
-                        print(f"\n  ✨ High-res capture successful: {high_res_frame.shape[1]}x{high_res_frame.shape[0]}")
-                    else:
-                        warped_to_save = warped
-                        raw_to_save = frame
-                        
-                    saved_pages = session.add_spread(warped_to_save, raw_frame=raw_to_save)
-                    pdf_path = session.compile_pdf()
-                    if len(saved_pages) == 2:
-                        print(f"  📸 Spread #{session.spread_count} captured & split into 2 pages (FR-4.2):")
-                        print(f"     ├── Left page:  {saved_pages[0].name}")
-                        print(f"     └── Right page: {saved_pages[1].name}")
-                    else:
-                        print(f"  📸 Cover / Single page #{session.spread_count} captured:")
-                        print(f"     └── Saved:      {saved_pages[0].name}")
-                    print(f"  📄 PDF compiled: {pdf_path.name} (Total pages: {session.page_count})\n")
+                    flash_timer = 1.0
+                    execute_capture(
+                        frame, result, warped, args, detector, warper, session, auto_controller, is_auto=False
+                    )
                 else:
                     saved = save_frame(frame, yolo_vis, warped, output_dir)
                     print(f"\n  ⚠️ No booklet detected to split. Saved raw snapshot: {saved.name}.jpg\n")

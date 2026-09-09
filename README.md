@@ -60,12 +60,14 @@ Frame → YOLO11 Inference → Confidence Gate → Corner Refinement → Perspec
 ├── corner_refiner.py      # Multi-strategy corner refinement engine
 ├── perspective.py         # Perspective warp + page splitting
 ├── pdf_compiler.py        # PDF compilation from split pages (FR-4.2)
-├── live_stream.py         # Live webcam/phone stream detection & capture
+├── live_stream.py         # Live webcam/phone stream detection & capture (auto & manual)
+├── auto_capture.py        # Automated hands-free capture controller (stability + anti-duplicate)
 ├── demo.py                # Visual demo with before/after comparison
 ├── benchmark.py           # Latency benchmarking
 ├── verify_fr42.py         # FR-4.2 PDF compilation verification script
 ├── test_detector.py       # Detection unit tests
 ├── test_pdf_compiler.py   # PDF compilation unit tests
+├── test_auto_capture.py   # Auto-capture unit tests
 ├── requirements.txt       # Dependencies
 │
 ├── training/
