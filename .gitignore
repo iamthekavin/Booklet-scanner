@@ -4,5 +4,6 @@ __pycache__/
 .venv/
 venv/
 *.pt
+!models/booklet_detector.pt
 training/dataset/
 runs/
