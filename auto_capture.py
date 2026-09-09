@@ -142,12 +142,25 @@ class AutoCaptureController:
             if not has_corners:
                 self.page_turn_detected = True
 
-            # Case 2: Significant corner drift relative to captured page
+            # Case 2: Hand interaction detected (flipping / adjusting page)
+            elif result is not None and (bool(result.hands_detected) or (ReviewFlag.HAND_OCCLUSION in result.review_flags)):
+                self.page_turn_detected = True
+
+            # Case 3: Significant booklet movement / geometry change
             elif self.captured_corners is not None:
                 curr_pts = result.corners.points.astype(np.float32)
-                # Max corner distance from the last captured quad
-                displacement = float(np.max(np.linalg.norm(curr_pts - self.captured_corners, axis=1)))
-                if displacement >= self.config.page_turn_drift_px:
+                corner_dists = np.linalg.norm(curr_pts - self.captured_corners, axis=1)
+                mean_dist = float(np.mean(corner_dists))
+                max_dist = float(np.max(corner_dists))
+                num_shifted = int(np.sum(corner_dists >= 20.0))
+
+                # Page turn / booklet repositioning requires either:
+                # - Broad movement across the entire quad (mean_dist >= drift threshold), OR
+                # - At least two corners shifted significantly (prevents single-corner flex/flutter false triggers)
+                is_movement = (mean_dist >= self.config.page_turn_drift_px) or (
+                    num_shifted >= 2 and max_dist >= (self.config.page_turn_drift_px * 1.5)
+                )
+                if is_movement:
                     self.page_turn_detected = True
 
             # If page turn was detected and booklet is now detected again, re-arm!

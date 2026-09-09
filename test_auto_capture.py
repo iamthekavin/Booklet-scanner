@@ -202,3 +202,31 @@ class TestAutoCaptureController:
         controller.notify_manual_capture(base_corners)
         assert controller.state == AutoCaptureState.COOLDOWN
         assert controller.cooldown_timer == controller.config.cooldown_duration
+
+    def test_single_corner_flex_does_not_trigger_page_turn(self, controller, base_corners):
+        """Smoothing or flexing only one corner (e.g. 70px) while 3 corners stay still must NOT trigger page turn."""
+        res = make_result(base_corners)
+
+        # 1. Trigger capture
+        controller.update(res, q_pass=True, dt=0.1)
+        controller.update(res, q_pass=True, dt=0.3)
+        captured, state, prog, msg = controller.update(res, q_pass=True, dt=0.3)
+        assert captured is True
+        assert state == AutoCaptureState.TRIGGERED
+
+        # 2. Advance through cooldown into WAITING_FOR_PAGE_TURN
+        controller.update(res, q_pass=True, dt=0.1)
+        controller.update(res, q_pass=True, dt=0.5)
+        assert controller.state == AutoCaptureState.WAITING_FOR_PAGE_TURN
+
+        # 3. Only corner 3 shifts by 70px (e.g. user smoothed down corner), others stay pinned (0px)
+        flexed_corners = base_corners.copy()
+        flexed_corners[3] += np.array([50.0, 50.0])  # ~70.7px displacement on single corner
+        res_flexed = make_result(flexed_corners)
+
+        captured, state, prog, msg = controller.update(res_flexed, q_pass=True, dt=0.1)
+        assert captured is False
+        # Must stay in WAITING_FOR_PAGE_TURN, NOT re-arm!
+        assert state == AutoCaptureState.WAITING_FOR_PAGE_TURN
+        assert controller.page_turn_detected is False
+
