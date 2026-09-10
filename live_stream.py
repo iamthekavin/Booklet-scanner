@@ -235,6 +235,15 @@ def capture_high_res_frame(args: argparse.Namespace) -> np.ndarray | None:
     return None
 
 def open_stream(args: argparse.Namespace) -> ThreadedCamera:
+    if getattr(args, "source", None) is not None:
+        src_str = str(args.source).strip()
+        if src_str.isdigit():
+            args.webcam = int(src_str)
+        elif src_str.startswith("http://") or src_str.startswith("https://") or src_str.startswith("rtsp://"):
+            args.url = src_str
+        else:
+            args.ip = src_str
+
     if args.webcam is not None:
         source = int(args.webcam)
         logger.info(f"Opening local webcam index {source}")
@@ -426,6 +435,7 @@ def capture_training_frame(frame, dataset_dir):
 
 def main() -> None:
     parser = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--source", type=str, default=None, help="Video source (webcam index like 0, IP address, or stream URL)")
     parser.add_argument("--ip", type=str, default=None)
     parser.add_argument("--url", type=str, default=None)
     parser.add_argument("--webcam", type=int, default=None)
@@ -435,7 +445,7 @@ def main() -> None:
     parser.add_argument("--scale", type=float, default=1.0, help="Display scaling factor (default: 1.0)")
     parser.add_argument("--fullscreen", action="store_true", default=False, help="Launch directly in true borderless fullscreen")
     parser.add_argument("--res", type=str, default="1280x720", choices=["1280x720", "1920x1080"], help="Base UI canvas resolution (default: 1280x720)")
-    parser.add_argument("--auto", dest="auto_capture", action="store_true", default=True, help="Enable auto-capture (default: True)")
+    parser.add_argument("--auto", "--auto-capture", dest="auto_capture", action="store_true", default=True, help="Enable auto-capture (default: True)")
     parser.add_argument("--no-auto", dest="auto_capture", action="store_false", help="Disable auto-capture")
     parser.add_argument("--auto-delay", type=float, default=1.0, help="Hold duration in seconds for auto-capture (default: 1.0s)")
     parser.add_argument("--booklet-frames", type=int, default=None, help="Spreads per booklet for auto-roll (e.g. 8 for an 8-spread / 16-page booklet)")
