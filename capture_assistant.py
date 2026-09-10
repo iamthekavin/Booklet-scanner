@@ -9,7 +9,7 @@ from datetime import datetime
 BASE_DIR = r"D:\VEE_SCAN\training\dataset\images\train"
 LOG_FILE = r"D:\VEE_SCAN\training\dataset\capture_log.csv"
 
-CATEGORIES = ["clean", "angle", "dist", "light", "hand", "blur"]
+CATEGORIES = ["clean", "angle", "dist", "light", "hand", "blur", "white-marble"]
 BLUR_THRESHOLD = 100.0  # Variance of Laplacian threshold (adjust if needed based on lighting/camera)
 
 def get_next_sequence(category_dir):
