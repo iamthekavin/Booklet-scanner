@@ -22,130 +22,143 @@ The YOLO11 approach solves this by first *localizing* the booklet with a neural 
 # 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. Run the demo (generates synthetic test frames on first run)
-python demo.py
+# 2. Run the live scanner (webcam or phone camera)
+python live_stream.py --source 0 --auto-capture
+
+# Or with an IP camera (e.g. DroidCam/IP Webcam):
+python live_stream.py --source http://192.168.1.100:8080/video --auto-capture
 
 # 3. Run benchmarks
 python benchmark.py --frames 50
 
-# 4. Run tests
-python -m pytest test_detector.py -v
+# 4. Run full test suite & PDF verification
+python -m pytest -v
+python verify_fr42.py
 ```
 
 ## Architecture
 
 ```
-Frame → YOLO11 Inference → Confidence Gate → Corner Refinement → Perspective Warp
-         │                    │                  │                    │
-         ├─ booklet bbox     ├─ high: YOLO+CV   ├─ Hough lines      ├─ flat booklet
-         ├─ hand detection   ├─ medium: CV+flag  ├─ contour approx   ├─ page split
-         └─ clutter detect   └─ low: flag review └─ corner detect    └─ enhance
+Camera Stream / Image
+         │
+         ▼
+┌──────────────────────────────────────────────────────────┐
+│ YOLO11 Detection (Fine-tuned on booklets & hands)         │
+│  - Booklet Bounding Box Localization                      │
+│  - Multi-background invariant (dark desk, white marble)   │
+│  - Hand Detection                                         │
+└──────────────────────────┬───────────────────────────────┘
+                           │
+         ┌─────────────────┴─────────────────┐
+         ▼                                   ▼
+┌───────────────────────────┐    ┌─────────────────────────────────────────┐
+│ Confidence-Gated Refiner  │    │ Physical Hand Occlusion Gate            │
+│  - Directional Sobel      │    │  - Overlap check against booklet quad   │
+│  - Outermost border snap  │    │  - Hands on desk/floor allowed          │
+│  - Huber robust line fit  │    │  - Hands occluding booklet pause auto   │
+└─────────────┬─────────────┘    └────────────────────┬────────────────────┘
+              │                                       │
+              └──────────────────┬────────────────────┘
+                                 ▼
+┌──────────────────────────────────────────────────────────┐
+│ Perspective Warper & Page Splitter                       │
+│  - Quad perspective rectification to flat spread        │
+│  - Vertical spine crease projection & valley detection   │
+│  - Split 2-page spread into left & right portrait pages  │
+│  - Contrast enhancement & sharpening                     │
+└──────────────────────────┬───────────────────────────────┘
+                           │
+                           ▼
+┌──────────────────────────────────────────────────────────┐
+│ Automated Hands-Free Session & PDF Compiler (FR-4.2)     │
+│  - Motion & stability tracking                           │
+│  - Page-turn detection & perceptual hash de-duplication  │
+│  - Direct compilation into single-page portrait PDF      │
+└──────────────────────────────────────────────────────────┘
 ```
 
-### Confidence Gate Logic
+## Live Scanner Key Controls
 
-| Confidence | Action | Needs Review? |
-|---|---|---|
-| ≥ 0.6 (high) | Trust YOLO bbox + CV corner refinement | No |
-| 0.3–0.6 (medium) | YOLO bbox + aggressive CV refinement | Depends on CV quality |
-| < 0.3 (low) | Best-effort detection, flag for review | **Yes** |
-| No detection | Full-frame CV fallback, flag for review | **Yes** |
+When running `live_stream.py`:
+- `SPACE`: Manually trigger capture of the current detected booklet
+- `A`: Toggle hands-free auto-capture mode on/off
+- `F` / `F11`: Toggle full screen
+- `R`: Reset auto-capture state
+- `C`: Finish booklet scanning and compile session PDF immediately
+- `Q` / `ESC`: Quit and save compiled PDF
+
+## CLI Options
+
+```bash
+python live_stream.py [OPTIONS]
+
+Options:
+  -s, --source TEXT       Camera source: webcam index (e.g. 0, 1) or stream URL (default: 0)
+  -a, --auto-capture      Enable hands-free auto-capture mode from start
+  -n, --frames-per-booklet INT
+                          Number of spreads per booklet before auto-compiling PDF (default: none)
+  -c, --confidence FLOAT  Detection confidence threshold (default: 0.35)
+  -d, --device TEXT       Device: auto, cpu, cuda (default: auto)
+  --output-dir PATH       Directory for session output (default: output/)
+```
+
+## Key Capabilities
+
+1. **Multi-Background Invariance**:
+   Fine-tuned on diverse backgrounds including dark wood grain, white marble, cardboard, and low-contrast desk surfaces.
+
+2. **Geometric Hand Occlusion Gating**:
+   Distinguishes hands resting on the desk/floor from hands actively occluding the booklet. Capture proceeds smoothly with hands in frame as long as the booklet surface is clear.
+
+3. **Outermost Border Alignment**:
+   Sobel gradient peak detection with asymmetric outward search prevents snapping to printed margin lines inside the booklet, ensuring the full page edge is captured.
+
+4. **FR-4.2 Multi-Page PDF Compilation**:
+   Each captured 2-page spread is automatically split at the detected spine crease into consecutive portrait pages (e.g. `001.jpg`, `002.jpg`) and compiled into a single PDF document.
 
 ## File Structure
 
 ```
 ├── config.py              # Central configuration (thresholds, paths, model settings)
-├── detector.py            # Main BookletDetector class
+├── detector.py            # BookletDetector class with geometric occlusion gating
 ├── models.py              # Data classes (DetectionResult, BoundingBox, QuadCorners)
-├── corner_refiner.py      # Multi-strategy corner refinement engine
-├── perspective.py         # Perspective warp + page splitting
-├── pdf_compiler.py        # PDF compilation from split pages (FR-4.2)
-├── live_stream.py         # Live webcam/phone stream detection & capture (auto & manual)
+├── corner_refiner.py      # Multi-strategy corner refinement engine (Sobel + Huber)
+├── perspective.py         # Perspective warp + spine crease page splitting
+├── pdf_compiler.py        # PDF compilation from split pages (FR-4.2 compliant)
+├── live_stream.py         # Live camera stream detection, dual-panel HUD, auto/manual capture
 ├── auto_capture.py        # Automated hands-free capture controller (stability + anti-duplicate)
 ├── demo.py                # Visual demo with before/after comparison
 ├── benchmark.py           # Latency benchmarking
 ├── verify_fr42.py         # FR-4.2 PDF compilation verification script
-├── test_detector.py       # Detection unit tests
-├── test_pdf_compiler.py   # PDF compilation unit tests
-├── test_auto_capture.py   # Auto-capture unit tests
+├── test_detector.py       # Detection unit tests (38 tests)
+├── test_pdf_compiler.py   # PDF compilation unit tests (8 tests)
+├── test_auto_capture.py   # Auto-capture unit tests (13 tests)
 ├── requirements.txt       # Dependencies
 │
 ├── training/
 │   ├── dataset.yaml       # YOLO dataset configuration
 │   ├── train.py           # Custom model training script
+│   ├── augment_backgrounds.py # Multi-background augmentation script
 │   ├── generate_synthetic.py  # Synthetic training data generator
-│   └── dataset_guide.md   # Annotation guide for labelers
+│   ├── dataset_guide.md   # Annotation guide for labelers
+│   └── assets/            # Training assets (backgrounds/booklets)
 │
-├── models/                # Trained model weights (git-ignored)
-├── output/                # Demo output images
-└── test_images/           # Test frames (generated or real)
+├── models/                # Trained model weights (booklet_detector.pt, ONNX)
+├── output/                # Session output images and compiled PDFs (git-ignored)
+└── test_images/           # Test frames for validation
 ```
 
-## Two-Phase Approach
-
-### Phase 1 (Current — Works Now)
-Uses COCO-pretrained YOLO11 (`yolo11n.pt`) which knows the `book` class (COCO class 73). Combined with CV corner refinement inside the detected ROI, this handles most real-world scenarios.
-
-### Phase 2 (After Labeling Data)
-Train a custom YOLO11 model on your specific booklet images for maximum accuracy:
+## Testing & Verification
 
 ```bash
-# 1. Generate synthetic training data to bootstrap
-python training/generate_synthetic.py --count 500
+# Run all 59 automated unit tests
+python -m pytest
 
-# 2. (Recommended) Label 300-500 real images — see training/dataset_guide.md
-
-# 3. Train custom model
-python training/train.py train --model yolo11s.pt --epochs 100
-
-# 4. Use the custom model
-# Set custom_model_path in config.py to your trained weights
-```
-
-## Performance
-
-| Configuration | Device | Expected Latency |
-|---|---|---|
-| YOLO11n (nano) | CPU | ~80–150ms |
-| YOLO11s (small) | CPU | ~150–300ms |
-| YOLO11n (nano) | GPU (CUDA) | ~10–25ms |
-| YOLO11n ONNX | CPU | ~50–100ms |
-| Full pipeline (detect + refine) | CPU | ~100–200ms |
-
-All configurations meet the 800ms latency budget. The nano model on CPU typically runs under 150ms.
-
-## Usage Example
-
-```python
-from detector import BookletDetector
-from config import DetectorConfig
-
-# Initialize with defaults
-detector = BookletDetector()
-
-# Or customize
-config = DetectorConfig(
-    confidence_threshold=0.3,
-    device='cuda',  # or 'cpu', 'auto'
-)
-detector = BookletDetector(config)
-
-# Detect booklet in a frame
-import cv2
-frame = cv2.imread("exam_booklet.jpg")
-result = detector.detect(frame)
-
-print(f"Method: {result.detection_method.value}")
-print(f"Confidence: {result.confidence:.2f}")
-print(f"Needs review: {result.needs_review}")
-print(f"Latency: {result.latency_ms:.1f}ms")
-
-if result.corners is not None:
-    # Warp to flat image
-    warped = detector.warp(frame, result)
-    cv2.imwrite("warped_booklet.jpg", warped)
+# Run end-to-end FR-4.2 verification
+python verify_fr42.py
 ```
 
 ## License
 
 Private — VEE Scanner project.
+

@@ -37,84 +37,69 @@ from perspective import PerspectiveWarper
 
 logger = logging.getLogger(__name__)
 
+def is_hand_occluding_booklet(
+    booklet_quad: Optional[np.ndarray],
+    booklet_bbox: Optional[BoundingBox],
+    hand: BoundingBox,
+    min_overlap_ratio: float = 0.03,
+    min_overlap_px: float = 250.0,
+) -> bool:
+    """Check if a hand bounding box physically occludes/overlaps the booklet.
+
+    A hand resting on the desk or floor beside the booklet returns False.
+    Returns True ONLY if the hand overlaps the booklet quad or bbox by at least
+    min_overlap_ratio of the hand area or min_overlap_px pixels.
+    """
+    hx1, hy1, hx2, hy2 = int(hand.x1), int(hand.y1), int(hand.x2), int(hand.y2)
+    hand_w = max(0, hx2 - hx1)
+    hand_h = max(0, hy2 - hy1)
+    hand_area = hand_w * hand_h
+    if hand_area <= 0:
+        return False
+
+    if booklet_quad is not None and len(booklet_quad) == 4:
+        qx1 = int(np.min(booklet_quad[:, 0]))
+        qy1 = int(np.min(booklet_quad[:, 1]))
+        qx2 = int(np.max(booklet_quad[:, 0]))
+        qy2 = int(np.max(booklet_quad[:, 1]))
+
+        # Fast AABB rejection
+        ix1 = max(hx1, qx1)
+        iy1 = max(hy1, qy1)
+        ix2 = min(hx2, qx2)
+        iy2 = min(hy2, qy2)
+        if ix2 <= ix1 or iy2 <= iy1:
+            return False
+
+        sub_w = ix2 - ix1
+        sub_h = iy2 - iy1
+        sub_quad = booklet_quad - np.array([ix1, iy1], dtype=np.float32)
+        mask = np.zeros((sub_h, sub_w), dtype=np.uint8)
+        cv2.fillPoly(mask, [sub_quad.astype(np.int32)], 255)
+
+        overlap_px = int(np.count_nonzero(mask))
+        overlap_ratio = overlap_px / float(hand_area)
+        return overlap_ratio >= min_overlap_ratio or overlap_px >= min_overlap_px
+
+    elif booklet_bbox is not None:
+        ix1 = max(hx1, int(booklet_bbox.x1))
+        iy1 = max(hy1, int(booklet_bbox.y1))
+        ix2 = min(hx2, int(booklet_bbox.x2))
+        iy2 = min(hy2, int(booklet_bbox.y2))
+        if ix2 <= ix1 or iy2 <= iy1:
+            return False
+        overlap_px = float((ix2 - ix1) * (iy2 - iy1))
+        overlap_ratio = overlap_px / float(hand_area)
+        return overlap_ratio >= min_overlap_ratio or overlap_px >= min_overlap_px
+
+    return False
+
+
 def detect_hand_skin_on_quad(
     frame: np.ndarray, quad_pts: Optional[np.ndarray]
 ) -> Tuple[bool, float, list[BoundingBox]]:
-    """Detect presence of human hand/skin over the booklet surface.
-
-    Uses dual-color space (YCrCb + HSV) skin segmentation with morphological
-    filtering. Downscales internally to max 480px for sub-millisecond execution (<1ms)
-    without sacrificing boundary detection accuracy.
-    """
-    if quad_pts is None or len(quad_pts) < 4:
-        return False, 0.0, []
-
-    h, w = frame.shape[:2]
-    max_dim = max(h, w)
-    scale = min(1.0, 480.0 / float(max_dim))
-
-    if scale < 1.0:
-        small_frame = cv2.resize(frame, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
-        small_quad = quad_pts * scale
-        sh, sw = small_frame.shape[:2]
-    else:
-        small_frame = frame
-        small_quad = quad_pts
-        sh, sw = h, w
-
-    mask = np.zeros((sh, sw), dtype=np.uint8)
-    pts = small_quad.astype(np.int32)
-    cv2.fillPoly(mask, [pts], 255)
-
-    pad = max(4, int(min(sh, sw) * 0.02))
-    kernel_erode = cv2.getStructuringElement(cv2.MORPH_RECT, (pad * 2 + 1, pad * 2 + 1))
-    mask_inner = cv2.erode(mask, kernel_erode)
-
-    booklet_area = np.sum(mask_inner > 0)
-    if booklet_area < 200:
-        return False, 0.0, []
-
-    ycrcb = cv2.cvtColor(small_frame, cv2.COLOR_BGR2YCrCb)
-    skin_ycrcb = cv2.inRange(ycrcb, np.array([0, 133, 77]), np.array([255, 173, 127]))
-    hsv = cv2.cvtColor(small_frame, cv2.COLOR_BGR2HSV)
-    skin_hsv = cv2.inRange(hsv, np.array([0, 30, 60]), np.array([25, 200, 255]))
-
-    skin = cv2.bitwise_and(skin_ycrcb, skin_hsv)
-    skin_on_booklet = cv2.bitwise_and(skin, mask_inner)
-
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    clean_skin = cv2.morphologyEx(skin_on_booklet, cv2.MORPH_OPEN, kernel)
-    clean_skin = cv2.morphologyEx(clean_skin, cv2.MORPH_CLOSE, kernel)
-
-    contours, _ = cv2.findContours(clean_skin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    hand_boxes: list[BoundingBox] = []
-    valid_skin_px = 0
-    min_area = 1900.0 * (scale * scale)
-    min_dim = 22.0 * scale
-
-    for c in contours:
-        area = cv2.contourArea(c)
-        if area >= min_area:
-            x, y, bw, bh = cv2.boundingRect(c)
-            # A real finger or hand has thickness
-            if min(bw, bh) >= min_dim and max(bw, bh) / max(1.0, float(min(bw, bh))) < 7.0:
-                inv_scale = 1.0 / scale
-                hand_boxes.append(
-                    BoundingBox(
-                        x1=float(x * inv_scale),
-                        y1=float(y * inv_scale),
-                        x2=float((x + bw) * inv_scale),
-                        y2=float((y + bh) * inv_scale),
-                        confidence=0.9,
-                        class_id=1,
-                        class_name="hand",
-                    )
-                )
-                valid_skin_px += int(area)
-
-    ratio = valid_skin_px / float(booklet_area)
-    has_hand = len(hand_boxes) > 0 or ratio >= 0.015
-    return has_hand, ratio, hand_boxes
+    """Legacy skin detection helper (deprecated in favor of YOLO hand detection)."""
+    return False, 0.0, []
 
 
 
@@ -220,12 +205,11 @@ class BookletDetector:
         if len(booklet_detections) > 1:
             review_flags.append(ReviewFlag.MULTIPLE_BOOKLETS)
 
-        # ── Step 3: Hand occlusion check (YOLO class) ─────────────────
+        # ── Step 3: Hand detection logging ────────────────────────────
+        # Hands detected in the frame by YOLO are preserved in hands_detected.
+        # Physical occlusion against the booklet is evaluated in Step 4b.
         if hands:
-            review_flags.append(ReviewFlag.HAND_OCCLUSION)
-            logger.info(f"Hand(s) detected ({len(hands)}). Will mask during refinement.")
-
-
+            logger.debug(f"Hand(s) detected in frame ({len(hands)}).")
 
         # ── Step 4: Confidence-gated corner refinement ────────────────
         def _covers_bbox(corners_pts: np.ndarray, bbox: BoundingBox) -> bool:
@@ -263,15 +247,19 @@ class BookletDetector:
             corners = self._bbox_to_corners(best)
             method = DetectionMethod.YOLO_DIRECT
 
-        # ── Step 4b: CV Skin / Hand occlusion check on candidate booklet ─
+        # ── Step 4b: Physical Hand Occlusion Check ────────────────────
+        # A hand only occludes if it physically overlaps the booklet surface.
+        # Hands resting on the desk or floor beside the booklet do NOT block capture.
         check_pts = corners if corners is not None else self._bbox_to_corners(best)
-        has_skin, skin_ratio, skin_boxes = detect_hand_skin_on_quad(frame, check_pts)
-        if has_skin:
-            hands.extend(skin_boxes)
+        occluding_hands = [
+            h for h in hands
+            if is_hand_occluding_booklet(check_pts, best, h)
+        ]
+        if occluding_hands:
             if ReviewFlag.HAND_OCCLUSION not in review_flags:
                 review_flags.append(ReviewFlag.HAND_OCCLUSION)
             logger.info(
-                f"Hand/skin detected on booklet ({skin_ratio*100:.1f}% surface, {len(skin_boxes)} patches)."
+                f"Hand occlusion detected ({len(occluding_hands)} hand(s) overlapping booklet surface)."
             )
 
         if best.confidence < self.config.medium_confidence:

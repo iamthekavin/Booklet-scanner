@@ -21,6 +21,7 @@ from models import (
 from corner_refiner import CornerRefiner
 from perspective import PerspectiveWarper
 from config import DetectorConfig, PathConfig, resolve_device
+from detector import is_hand_occluding_booklet
 
 
 # ─── Fixtures ─────────────────────────────────────────────────────────────────
@@ -403,4 +404,55 @@ class TestSyntheticDetection:
             ], dtype=np.float32),
             atol=1.0,
         )
+
+
+# ─── TestHandOcclusion ───────────────────────────────────────────────────────
+
+class TestHandOcclusion:
+    """Tests for physical hand occlusion geometry checks."""
+
+    def test_hand_outside_booklet_not_occluding(self):
+        """A hand resting on the desk or floor beside the booklet does not occlude it."""
+        booklet_quad = np.array([
+            [400, 100],
+            [1000, 100],
+            [1000, 800],
+            [400, 800]
+        ], dtype=np.float32)
+        # Hand on left (e.g. on desk pad / marble floor)
+        hand_left = BoundingBox(x1=50, y1=200, x2=250, y2=500, confidence=0.75, class_id=1, class_name="hand")
+        assert not is_hand_occluding_booklet(booklet_quad, None, hand_left)
+
+        # Hand on right
+        hand_right = BoundingBox(x1=1100, y1=200, x2=1250, y2=500, confidence=0.75, class_id=1, class_name="hand")
+        assert not is_hand_occluding_booklet(booklet_quad, None, hand_right)
+
+        # Hand above booklet
+        hand_top = BoundingBox(x1=500, y1=10, x2=700, y2=80, confidence=0.75, class_id=1, class_name="hand")
+        assert not is_hand_occluding_booklet(booklet_quad, None, hand_top)
+
+    def test_hand_overlapping_booklet_is_occluding(self):
+        """A hand entering or touching the booklet surface returns True."""
+        booklet_quad = np.array([
+            [400, 100],
+            [1000, 100],
+            [1000, 800],
+            [400, 800]
+        ], dtype=np.float32)
+        # Hand overlapping booklet edge (e.g. thumb holding page at x=380..500)
+        hand_on_edge = BoundingBox(x1=350, y1=200, x2=500, y2=350, confidence=0.85, class_id=1, class_name="hand")
+        assert is_hand_occluding_booklet(booklet_quad, None, hand_on_edge)
+
+        # Hand in center of booklet
+        hand_center = BoundingBox(x1=550, y1=300, x2=750, y2=500, confidence=0.90, class_id=1, class_name="hand")
+        assert is_hand_occluding_booklet(booklet_quad, None, hand_center)
+
+    def test_hand_occlusion_with_bbox_fallback(self):
+        """Occlusion check works reliably even when using coarse bbox fallback."""
+        booklet_bbox = BoundingBox(x1=300, y1=100, x2=800, y2=700, confidence=0.8, class_id=0, class_name="booklet")
+        hand_outside = BoundingBox(x1=50, y1=100, x2=200, y2=300, confidence=0.8, class_id=1, class_name="hand")
+        hand_inside = BoundingBox(x1=250, y1=200, x2=400, y2=350, confidence=0.8, class_id=1, class_name="hand")
+
+        assert not is_hand_occluding_booklet(None, booklet_bbox, hand_outside)
+        assert is_hand_occluding_booklet(None, booklet_bbox, hand_inside)
 

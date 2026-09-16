@@ -136,7 +136,7 @@ def run_verification() -> bool:
 
     for i in range(1, 4):
         spread_img = create_test_spread(index=i, width=1200, height=800)
-        lp, rp = session.add_spread(spread_img)
+        lp, rp = session.add_spread(spread_img, check_duplicate=False)
         print(f"  * Captured Spread #{i} -> Saved: {lp.name}, {rp.name}")
 
     multi_pdf = session.compile_pdf()

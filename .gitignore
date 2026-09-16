@@ -1,9 +1,35 @@
-output/
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# Testing and test caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual Environments
 .venv/
 venv/
+env/
+ENV/
+
+# Output sessions and runtime logs
+output/
+runs/
+*.log
+
+# Models and Datasets
 *.pt
 !models/booklet_detector.pt
 training/dataset/
-runs/
+training/assets/backgrounds/*
+!training/assets/backgrounds/.gitkeep
+training/assets/booklets/*
+!training/assets/booklets/.gitkeep
+
+# Operating System and Editor Files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

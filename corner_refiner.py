@@ -179,18 +179,20 @@ class CornerRefiner:
             gx = np.abs(cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=3))
             gy = np.abs(cv2.Sobel(blurred, cv2.CV_32F, 0, 1, ksize=3))
 
-            pad_w = max(15, int(0.12 * bw))
-            pad_h = max(15, int(0.12 * bh))
+            pad_out_w = max(12, int(0.035 * bw))
+            pad_in_w = max(20, int(0.065 * bw))
+            pad_out_h = max(12, int(0.035 * bh))
+            pad_in_h = max(20, int(0.065 * bh))
 
-            l_min, l_max = max(0, bx1 - pad_w), min(w, bx1 + pad_w)
-            r_min, r_max = max(0, bx2 - pad_w), min(w, bx2 + pad_w)
-            y_s = max(0, by1 + int(0.15 * bh))
-            y_e = min(h, by2 - int(0.15 * bh))
+            l_min, l_max = max(0, int(bx1 - pad_out_w)), min(w, int(bx1 + pad_in_w))
+            r_min, r_max = max(0, int(bx2 - pad_in_w)), min(w, int(bx2 + pad_out_w))
+            y_s = max(0, int(by1 + 0.15 * bh))
+            y_e = min(h, int(by2 - 0.15 * bh))
 
-            t_min, t_max = max(0, by1 - pad_h), min(h, by1 + pad_h)
-            b_min, b_max = max(0, by2 - int(0.18 * bh)), min(h, by2 + int(0.08 * bh))
-            x_s = max(0, bx1 + int(0.15 * bw))
-            x_e = min(w, bx2 - int(0.15 * bw))
+            t_min, t_max = max(0, int(by1 - pad_out_h)), min(h, int(by1 + pad_in_h))
+            b_min, b_max = max(0, int(by2 - pad_in_h)), min(h, int(by2 + pad_out_h))
+            x_s = max(0, int(bx1 + 0.15 * bw))
+            x_e = min(w, int(bx2 - 0.15 * bw))
 
             def _find_edge_line(grad_img, is_vertical, s_min, s_max, span_s, span_e, num_strips=8):
                 strip_len = (span_e - span_s) // num_strips
@@ -202,16 +204,15 @@ class CornerRefiner:
                     st_e = st_s + strip_len
                     if is_vertical:
                         prof = np.sum(grad_img[st_s:st_e, s_min:s_max], axis=0)
-                        if prof.size > 0 and np.max(prof) > 10:
-                            best_x = s_min + int(np.argmax(prof))
-                            mid_y = (st_s + st_e) / 2
-                            pts.append((best_x, mid_y))
                     else:
                         prof = np.sum(grad_img[s_min:s_max, st_s:st_e], axis=1)
-                        if prof.size > 0 and np.max(prof) > 10:
-                            best_y = s_min + int(np.argmax(prof))
-                            mid_x = (st_s + st_e) / 2
-                            pts.append((mid_x, best_y))
+                    if prof.size < 5 or np.max(prof) < 10:
+                        continue
+                    best_idx = int(np.argmax(prof))
+                    if is_vertical:
+                        pts.append((s_min + best_idx, (st_s + st_e) / 2))
+                    else:
+                        pts.append(((st_s + st_e) / 2, s_min + best_idx))
                 if len(pts) < 3:
                     return None
                 coords = [p[0] if is_vertical else p[1] for p in pts]
@@ -221,9 +222,8 @@ class CornerRefiner:
                 if len(filtered) < 3:
                     filtered = pts
                 arr = np.array(filtered, dtype=np.float32)
-                line = cv2.fitLine(arr, cv2.DIST_HUBER, 0, 0.01, 0.01)
-                vx, vy, x0, y0 = line.flatten()
-                return float(vx), float(vy), float(x0), float(y0)
+                line = cv2.fitLine(arr, cv2.DIST_HUBER, 0, 0.01, 0.01).flatten()
+                return float(line[0]), float(line[1]), float(line[2]), float(line[3])
 
             ll = _find_edge_line(gx, True, l_min, l_max, y_s, y_e)
             rl = _find_edge_line(gx, True, r_min, r_max, y_s, y_e)
@@ -280,37 +280,39 @@ class CornerRefiner:
             gx = np.abs(cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=3))
             gy = np.abs(cv2.Sobel(blurred, cv2.CV_32F, 0, 1, ksize=3))
 
-            pad_w = max(10, int(0.10 * bw))
-            pad_h = max(10, int(0.10 * bh))
+            pad_out_w = max(12, int(0.035 * bw))
+            pad_in_w = max(20, int(0.065 * bw))
+            pad_out_h = max(12, int(0.035 * bh))
+            pad_in_h = max(20, int(0.065 * bh))
 
             y_s = max(0, by1 + int(0.20 * bh))
             y_e = min(h, by2 - int(0.20 * bh))
             x_s = max(0, bx1 + int(0.20 * bw))
             x_e = min(w, bx2 - int(0.20 * bw))
 
-            # Left
-            l_min = max(0, bx1 - pad_w)
-            l_max = min(w, bx1 + pad_w)
+            # Left (argmax within band)
+            l_min = max(0, bx1 - pad_out_w)
+            l_max = min(w, bx1 + pad_in_w)
             prof_l = np.sum(gx[y_s:y_e, l_min:l_max], axis=0) if l_max > l_min else np.array([])
-            snap_x1 = l_min + int(np.argmax(prof_l)) if len(prof_l) > 0 and np.max(prof_l) > 0 else bx1
+            snap_x1 = l_min + int(np.argmax(prof_l)) if len(prof_l) > 0 and np.max(prof_l) > 10 else bx1
 
-            # Right
-            r_min = max(0, bx2 - pad_w)
-            r_max = min(w, bx2 + pad_w)
+            # Right (argmax within band)
+            r_min = max(0, bx2 - pad_in_w)
+            r_max = min(w, bx2 + pad_out_w)
             prof_r = np.sum(gx[y_s:y_e, r_min:r_max], axis=0) if r_max > r_min else np.array([])
-            snap_x2 = r_min + int(np.argmax(prof_r)) if len(prof_r) > 0 and np.max(prof_r) > 0 else bx2
+            snap_x2 = r_min + int(np.argmax(prof_r)) if len(prof_r) > 0 and np.max(prof_r) > 10 else bx2
 
-            # Top
-            t_min = max(0, by1 - pad_h)
-            t_max = min(h, by1 + pad_h)
+            # Top (argmax within band)
+            t_min = max(0, by1 - pad_out_h)
+            t_max = min(h, by1 + pad_in_h)
             prof_t = np.sum(gy[t_min:t_max, x_s:x_e], axis=1) if t_max > t_min else np.array([])
-            snap_y1 = t_min + int(np.argmax(prof_t)) if len(prof_t) > 0 and np.max(prof_t) > 0 else by1
+            snap_y1 = t_min + int(np.argmax(prof_t)) if len(prof_t) > 0 and np.max(prof_t) > 10 else by1
 
-            # Bottom
-            b_min = max(0, by2 - int(0.18 * bh))
-            b_max = min(h, by2 + int(0.08 * bh))
+            # Bottom (argmax within band)
+            b_min = max(0, by2 - pad_in_h)
+            b_max = min(h, by2 + pad_out_h)
             prof_b = np.sum(gy[b_min:b_max, x_s:x_e], axis=1) if b_max > b_min else np.array([])
-            snap_y2 = b_min + int(np.argmax(prof_b)) if len(prof_b) > 0 and np.max(prof_b) > 0 else by2
+            snap_y2 = b_min + int(np.argmax(prof_b)) if len(prof_b) > 0 and np.max(prof_b) > 10 else by2
 
             corners = np.array([
                 [snap_x1, snap_y1],

@@ -18,7 +18,7 @@ import numpy as np
 # Ensure local imports work regardless of working directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from detector import BookletDetector
+from detector import BookletDetector, is_hand_occluding_booklet
 from config import DetectorConfig
 from corner_refiner import CornerRefiner
 from models import DetectionMethod, DetectionResult, ReviewFlag
@@ -95,10 +95,14 @@ def draw_yolo_geometry(vis: np.ndarray, result: DetectionResult) -> np.ndarray:
             cv2.circle(vis, p1, 7, RED, -1, cv2.LINE_AA)
             cv2.putText(vis, ["TL", "TR", "BR", "BL"][i], (p1[0] + 10, p1[1] - 10), FONT_SMALL, 1.2, WHITE, 1)
 
+    booklet_pts = result.corners.points if result.corners is not None else None
     for hand in result.hands_detected:
         hx1, hy1, hx2, hy2 = int(hand.x1), int(hand.y1), int(hand.x2), int(hand.y2)
-        cv2.rectangle(vis, (hx1, hy1), (hx2, hy2), ORANGE, 2)
-        cv2.putText(vis, f"hand {hand.confidence:.0%}", (hx1, hy1 - 6), FONT_SMALL, 1.1, ORANGE, 1)
+        is_occluding = is_hand_occluding_booklet(booklet_pts, result.bbox, hand) if (booklet_pts is not None or result.bbox is not None) else False
+        col = RED if is_occluding else ORANGE
+        lbl = f"hand (on booklet) {hand.confidence:.0%}" if is_occluding else f"hand {hand.confidence:.0%}"
+        cv2.rectangle(vis, (hx1, hy1), (hx2, hy2), col, 2)
+        cv2.putText(vis, lbl, (hx1, hy1 - 6), FONT_SMALL, 1.1, col, 1)
         
     return vis
 

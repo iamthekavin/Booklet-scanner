@@ -147,7 +147,7 @@ class AutoCaptureController:
                 self.page_turn_detected = True
 
             # Case 2: Hand interaction detected (flipping / adjusting page)
-            elif result is not None and (bool(result.hands_detected) or (ReviewFlag.HAND_OCCLUSION in result.review_flags)):
+            elif result is not None and (ReviewFlag.HAND_OCCLUSION in result.review_flags):
                 self.page_turn_detected = True
 
             # Case 3: Significant booklet movement / geometry change
@@ -194,12 +194,12 @@ class AutoCaptureController:
             return False, self.state, 0.0, "Low confidence detection"
 
         if self.config.require_no_hands:
-            has_hands = bool(result.hands_detected) or (ReviewFlag.HAND_OCCLUSION in result.review_flags)
-            if has_hands:
+            has_occluding_hand = (ReviewFlag.HAND_OCCLUSION in result.review_flags)
+            if has_occluding_hand:
                 self.stable_timer = 0.0
                 self.hand_settle_timer = self.config.post_hand_settle_s
                 self.state = AutoCaptureState.IDLE
-                return False, self.state, 0.0, "Hand detected - remove hand"
+                return False, self.state, 0.0, "Hand detected on booklet - remove hand"
 
         if self.hand_settle_timer > 0.0:
             self.hand_settle_timer = max(0.0, self.hand_settle_timer - dt)

@@ -268,5 +268,45 @@ class TestAutoCaptureController:
         assert state == AutoCaptureState.STABILIZING
         assert controller.stable_timer > 0.0
 
+    def test_hand_outside_booklet_allows_capture(self, controller, base_corners):
+        """A hand in the frame that does NOT occlude the booklet allows auto-capture to trigger."""
+        quad = QuadCorners(points=base_corners.astype(np.float32))
+        bbox = BoundingBox(
+            x1=float(base_corners[:, 0].min()),
+            y1=float(base_corners[:, 1].min()),
+            x2=float(base_corners[:, 0].max()),
+            y2=float(base_corners[:, 1].max()),
+            confidence=0.85,
+            class_id=0,
+            class_name="booklet",
+        )
+        # Hand far away on the left (e.g. resting on table / floor)
+        hand_outside = BoundingBox(
+            x1=10.0, y1=100.0, x2=150.0, y2=400.0,
+            confidence=0.8, class_id=1, class_name="hand"
+        )
+        res = DetectionResult(
+            bbox=bbox,
+            corners=quad,
+            confidence=0.85,
+            detection_method=DetectionMethod.YOLO_CV_REFINED,
+            review_flags=[ReviewFlag.OK],  # No occlusion!
+            needs_review=False,
+            hands_detected=[hand_outside],
+            clutter_detected=[],
+            latency_ms=10.0,
+            raw_detections=[bbox, hand_outside],
+            frame_shape=(720, 1280),
+        )
+        # Frame 1: establishes baseline
+        controller.update(res, q_pass=True, dt=0.1)
+        # Frame 2: steady 0.3s
+        controller.update(res, q_pass=True, dt=0.3)
+        # Frame 3: steady 0.3s -> total 0.6s >= 0.5s stability threshold
+        captured, state, prog, msg = controller.update(res, q_pass=True, dt=0.3)
+        assert captured is True
+        assert state == AutoCaptureState.TRIGGERED
+
+
 
 
